@@ -64,6 +64,7 @@
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyMarker.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandSubsystemBootDiagnostics.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\CalibrationManager.cs" />
     <Compile Include="Assets\Scripts\Cockpit\TargetingHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HitTarget.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />

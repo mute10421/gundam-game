@@ -1,0 +1,5 @@
+C:/Users/mbc/Documents/github 2/gundam-game/gundam game/.utmp/RelWithDebInfo/4730v6wv/arm64-v8a/CMakeFiles/edit_cache.dir
+C:/Users/mbc/Documents/github 2/gundam-game/gundam game/.utmp/RelWithDebInfo/4730v6wv/arm64-v8a/CMakeFiles/rebuild_cache.dir
+C:/Users/mbc/Documents/github 2/gundam-game/gundam game/.utmp/RelWithDebInfo/4730v6wv/arm64-v8a/GameActivity/CMakeFiles/game.dir
+C:/Users/mbc/Documents/github 2/gundam-game/gundam game/.utmp/RelWithDebInfo/4730v6wv/arm64-v8a/GameActivity/CMakeFiles/edit_cache.dir
+C:/Users/mbc/Documents/github 2/gundam-game/gundam game/.utmp/RelWithDebInfo/4730v6wv/arm64-v8a/GameActivity/CMakeFiles/rebuild_cache.dir

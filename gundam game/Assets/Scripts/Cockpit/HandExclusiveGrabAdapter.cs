@@ -78,7 +78,11 @@ namespace Gundam.Cockpit
             }
 
             _currentInteractor = args.interactorObject;
-            if (joystick != null) joystick.NotifyXRIGrabbed(true);
+            // Pass the verified-correct interactor's own Transform through, so
+            // JoystickLever can read position directly from THIS exact object
+            // (see its _grabbedInteractor/GetActiveHandWorldPosition) instead of
+            // going back through a separate looked-up hand reference.
+            if (joystick != null) joystick.NotifyXRIGrabbed(true, args.interactorObject.transform);
         }
 
         void OnSelectExited(SelectExitEventArgs args)

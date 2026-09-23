@@ -299,6 +299,48 @@ namespace Gundam.EditorTools
                 }
             }
 
+            // --- Cockpit Calibration: lets each player set their own comfortable
+            //     joystick reach before combat starts (per request - "사람마다
+            //     팔 길이와 앉는 위치가 다르기 때문에... 자신의 몸에 맞게 왼쪽/
+            //     오른쪽 조종간 위치를 설정할 수 있어야 한다"). Repositions each
+            //     joystick's whole Mount (leftStick.transform/rightStick.transform
+            //     - never JoystickLever's own internal pivot/handle/grab math,
+            //     which is left completely untouched) so it physically appears
+            //     wherever the player's hand naturally rests. Runs fresh every
+            //     app start (no PlayerPrefs persistence - see CalibrationManager.cs
+            //     for why), and per the latest request ("확인을 누르면 게임이
+            //     시작되는거고") ends with an explicit CONFIRM button press rather
+            //     than auto-completing the instant the right joystick is released.
+            //     See CalibrationManager.cs for the full flow - this is just the
+            //     wiring. Left/Right hand exclusivity mirrors JoystickLever's own
+            //     (leftHand only ever drives leftStick's calibration, rightHand
+            //     only ever drives rightStick's). ---
+            CalibrationManager calibManager = suitRoot.AddComponent<CalibrationManager>();
+            calibManager.leftStick = leftStick;
+            calibManager.rightStick = rightStick;
+            calibManager.leftHandTracker = leftHand;
+            calibManager.rightHandTracker = rightHand;
+
+            // Per report ("LeftJoystick/RightJoystick 조종간 자체가 화면에 보이지
+            // 않는다... CalibrationManager를 추가한 이후부터 발생") - the prompt
+            // panel used to be parented to the XR rig's camera (head-locked), which
+            // is what caused the joysticks to visually disappear. It's now mounted
+            // to the cockpit interior instead, so no camera lookup is needed here.
+            //
+            // Per follow-up report ("새로 이상한 디스플레이 만든거 지우고") - the
+            // very next version of this panel added a physical CreatePolarScreen
+            // frame+screen prop (like another SystemCheckDisplay panel), which read
+            // as an out-of-place extra console screen. BuildCalibrationPromptUI is
+            // now just floating text with no physical prop/frame at all - see its
+            // doc comment.
+            calibManager.promptText = BuildCalibrationPromptUI(interior.transform);
+
+            // Per request ("확인을 누르면 게임이 시작되는거고") - a physical
+            // "press to confirm" button, shown only after both joysticks have
+            // been placed (see CalibrationManager's WaitingForConfirm state).
+            // Same grip-ball visual language as the joysticks' own GripBall.
+            calibManager.confirmButton = BuildCalibrationConfirmButton(interior.transform, buttonGreenMat);
+
             // --- Targets to shoot at — pushed out to the sides/above-below so they
             //     sit in the open space around the front display, not stacked
             //     directly behind it. Kept in world space, not parented to the suit. ---
@@ -561,31 +603,18 @@ namespace Gundam.EditorTools
             headCam.clearFlags = CameraClearFlags.SolidColor;
             headCam.backgroundColor = new Color(0.01f, 0.01f, 0.025f, 1f); // same deep-space color as the main view
 
-            // REVERSED per latest request ("건담에 머리는 안보이는데 몸통은
-            // 보였으면 좋겠어" - head should stay hidden, but the torso should
-            // be visible). This used to exclude GundamBodyLayer entirely (see
-            // git history / earlier comment here) because the chest/shoulders
-            // showing up at the bottom of frame read as "seeing my own robot's
-            // body from outside itself" once the same feed got stretched
-            // across the whole Cockpit_Dome - but the pilot now wants exactly
-            // that self-view back for the torso specifically. headCam is left
-            // at its default "sees everything" mask (no exclusion) here; the
-            // head itself should still stay out of frame on its own, since
-            // this camera sits essentially AT the head's own front surface
-            // (see eyeHeight/forwardClearance above) facing outward/forward -
-            // the head geometry is beside/behind the lens, not in front of it,
-            // while the torso/shoulders (lower and further from the camera)
-            // sit squarely in the forward view. This is a geometry-based
-            // assumption I can't visually verify myself - if the head DOES
-            // still show up somewhere (e.g. looking straight down), tell me
-            // and I'll add a proper shader-based height clip instead of
-            // relying on the camera's position/FOV alone.
-            //
-            // Note: the MAIN player-view camera (see CreateXROrigin below)
-            // still excludes GundamBodyLayer - that one is unrelated to this
-            // headCam self-view and still hides ExternalGundam (a separate
-            // floating object, not part of the player's own suit) from the
-            // pilot's direct first-person view.
+            // Excludes GundamBodyLayer here too, per follow-up request ("그냥
+            // 콕핏안에서는 내건담에 모습이 보이면안됨" - nothing of the pilot's
+            // own Gundam should be visible anywhere inside the cockpit, full
+            // stop). An earlier request wanted the torso visible in this
+            // specific self-view feed while only the head stayed hidden (via
+            // camera position/FOV alone, with headCam left at its default
+            // "sees everything" mask) - that's now superseded. headCam
+            // matches the main player-view camera exactly, so ExternalGundam's
+            // whole body is invisible both in the pilot's direct first-person
+            // view AND in this self-view feed (and by extension the 360
+            // skybox/Cockpit_Dome background it also drives, further below).
+            headCam.cullingMask &= ~(1 << GundamBodyLayer);
 
             Debug.Log("[Gundam] Head camera attached to the '" + head.name + "' bone, feeding RenderTexture at " +
                 HeadCamRenderTexturePath + ".");
@@ -1253,6 +1282,102 @@ namespace Gundam.EditorTools
             canvas.renderMode = RenderMode.WorldSpace;
             canvasGo.AddComponent<CanvasScaler>();
             return canvas;
+        }
+
+        /// <summary>Cockpit Calibration's step-by-step prompt - plain WORLD-FIXED
+        /// floating text mounted to the cockpit interior, with NO physical panel,
+        /// frame, or screen prop of any kind.
+        ///
+        /// This went through two earlier versions, both reported as bugs:
+        ///   1. A HEAD-LOCKED Canvas parented directly to the player's view camera -
+        ///      being opaque and dead-center, it followed the player's gaze
+        ///      everywhere, including straight down at the joysticks whenever they
+        ///      leaned in to grab one, visually covering them ("LeftJoystick/
+        ///      RightJoystick 조종간 자체가 화면에 보이지 않는다").
+        ///   2. A world-fixed version that used CreatePolarScreen to build a
+        ///      physical frame+screen prop, the same way BuildSystemCheckDisplay
+        ///      builds its dashboard screens - this fixed the occlusion, but read as
+        ///      an odd extra console screen that didn't belong there ("새로 이상한
+        ///      디스플레이 만든거 지우고").
+        /// This version drops the physical prop entirely: just a small floating
+        /// Text with an Outline component for contrast (no backing Image, no frame,
+        /// no screen cube), mounted high and slightly back (baseY/z below) so it
+        /// stays out of the way of the joysticks and the SystemCheckDisplay cluster
+        /// alike, and reads as an on-screen prompt rather than a piece of hardware.
+        ///
+        /// Hidden automatically by CalibrationManager once calibration completes -
+        /// see that script.</summary>
+        static Text BuildCalibrationPromptUI(Transform interior)
+        {
+            GameObject canvasGo = new GameObject("CalibrationPrompt_Canvas");
+            canvasGo.transform.SetParent(interior, false);
+            canvasGo.transform.localPosition = new Vector3(0f, 1.25f, 0.32f); // above the joysticks (y=0.87) and the display cluster (y=0.92); z between the joysticks (0.18) and the displays (~0.48)
+            canvasGo.transform.localRotation = Quaternion.identity; // same no-yaw convention CreateWorldCanvas/CreatePolarScreen(angleDeg:0) already rely on to face the pilot
+            canvasGo.transform.localScale = Vector3.one * 0.0009f;
+
+            RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
+            canvasRect.sizeDelta = new Vector2(560, 160);
+
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvasGo.AddComponent<CanvasScaler>();
+
+            Text prompt = CreateUIText("PromptText", canvasGo.transform, Vector2.zero, new Vector2(540, 140), 26,
+                TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "COCKPIT CALIBRATION");
+            Outline outline = prompt.gameObject.AddComponent<Outline>();
+            outline.effectColor = new Color(0f, 0f, 0f, 0.85f);
+            outline.effectDistance = new Vector2(2f, -2f);
+
+            return prompt;
+        }
+
+        /// <summary>Physical "press to confirm" button used to end Cockpit
+        /// Calibration and start the game, per request ("확인을 누르면 게임이
+        /// 시작되는거고"). A simple touch-sensitive sphere - same grip-ball visual
+        /// language as the joysticks' own GripBall - rather than a full XR
+        /// Interaction Toolkit interactable: CalibrationManager's
+        /// IsHandPressingConfirm treats either hand's palm coming within
+        /// confirmPressRadius of this root Transform's position as a "press", using
+        /// only HandJointTracker's existing public PalmPosition (no changes to
+        /// hand-tracking code).
+        ///
+        /// Returns the ROOT of a small object group (button sphere + a "확인"
+        /// label floating just above it) rather than the sphere itself, so
+        /// CalibrationManager can show/hide both together with one
+        /// GameObject.SetActive call while still reading the root's position as
+        /// the button's location (the sphere sits at the root's local origin).
+        ///
+        /// Starts inactive - GundamCockpitSetup only builds it, CalibrationManager
+        /// is what shows it (only during its WaitingForConfirm state, once both
+        /// joysticks have been placed) and hides it again once pressed.</summary>
+        static Transform BuildCalibrationConfirmButton(Transform interior, Material mat)
+        {
+            GameObject root = new GameObject("CalibrationConfirmButton");
+            root.transform.SetParent(interior, false);
+            root.transform.localPosition = new Vector3(0f, 1.0f, 0.28f); // centered between the two joysticks (x=+-0.22, y=0.87, z=0.18), just above/forward of them - an easy, unambiguous reach for either hand
+
+            CreateSphere("CalibrationConfirmButton_Ball", root.transform, Vector3.zero, new Vector3(0.07f, 0.07f, 0.07f), mat);
+
+            GameObject canvasGo = new GameObject("CalibrationConfirmButton_Label");
+            canvasGo.transform.SetParent(root.transform, false);
+            canvasGo.transform.localPosition = new Vector3(0f, 0.09f, 0f); // just above the 0.07m ball
+            canvasGo.transform.localRotation = Quaternion.identity;
+            canvasGo.transform.localScale = Vector3.one * 0.0007f;
+
+            RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
+            canvasRect.sizeDelta = new Vector2(220, 90);
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvasGo.AddComponent<CanvasScaler>();
+
+            Text label = CreateUIText("Text", canvasGo.transform, Vector2.zero, new Vector2(200, 70), 30,
+                TextAnchor.MiddleCenter, new Color(0.85f, 1f, 0.85f), "확인");
+            Outline labelOutline = label.gameObject.AddComponent<Outline>();
+            labelOutline.effectColor = new Color(0f, 0f, 0f, 0.85f);
+            labelOutline.effectDistance = new Vector2(2f, -2f);
+
+            root.SetActive(false); // shown only by CalibrationManager, during its WaitingForConfirm state
+            return root.transform;
         }
 
         /// <summary>A ring of radial tick marks (like the reference's circular dial),

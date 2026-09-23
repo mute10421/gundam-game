@@ -1,0 +1,10 @@
+# ninja log v5
+3	1504	8118324478582782	GameActivity/CMakeFiles/game.dir/UGAConfiguration.cpp.o	c73820096c6597b6
+16	1531	8118324478832809	GameActivity/CMakeFiles/game.dir/UGAInputMotionEvent.cpp.o	9a81fcf8d21fe6ae
+8	1535	8118324478922711	GameActivity/CMakeFiles/game.dir/UGAInputKeyEvent.cpp.o	72ddf8811dad9483
+12	1562	8118324479060224	GameActivity/CMakeFiles/game.dir/UGAEntry.cpp.o	b2d838c7376e35f4
+6	1591	8118324479427989	GameActivity/CMakeFiles/game.dir/UGADebug.cpp.o	eeddb04b606ec53a
+33	1687	8118324480462111	GameActivity/CMakeFiles/game.dir/UGASoftKeyboard.cpp.o	1398189dbd68faf2
+10	1862	8118324482248863	GameActivity/CMakeFiles/game.dir/UGAInput.cpp.o	661b95795f4dcd11
+0	1962	8118324483194314	GameActivity/CMakeFiles/game.dir/UGAApplication.cpp.o	77598adf46323ad5
+1963	2028	8118324483903374	C:/Users/mbc/Documents/github 2/gundam-game/gundam game/Library/Bee/Android/Prj/IL2CPP/Gradle/unityLibrary/build/intermediates/cxx/RelWithDebInfo/4730v6wv/obj/arm64-v8a/libgame.so	addc86db7dfa7

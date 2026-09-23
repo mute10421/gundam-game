@@ -1,0 +1,4 @@
+repository "gundam game/gundam game@14569797528811@cloud"
+  path "/"
+    br "/main"
+    co "/main"

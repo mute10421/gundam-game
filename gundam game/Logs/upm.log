@@ -1,0 +1,21 @@
+[2026-09-23T00:40:03.326Z][INFO] Command-line: 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.6.0f1\\Editor\\Data\\Resources\\PackageManager\\Server\\UnityPackageManager.exe' server -s 2356 --ipc-path Unity-Upm-2356 -l 2 --log-file 'C:\\Users\\mbc\\Documents\\깃허브\\gundam-game\\gundam game/Logs/upm.log'
+[2026-09-23T00:40:03.346Z][INFO] IPC server started (IPC path=Unity-Upm-2356).
+[2026-09-23T00:40:03.346Z][INFO] Hint: To connect to this UPM instance, launch Unity with the command-line parameter -upmIpcPath Upm-2356.
+[2026-09-23T00:40:04.969Z][INFO] project:list-packages <-- Request received
+params: {}
+[2026-09-23T00:40:05.119Z][INFO] config:project:get-registries <-- Request received
+params: {}
+[2026-09-23T00:40:05.133Z][INFO] project:list-packages <-- Request received
+params: {}
+[2026-09-23T00:40:05.150Z][INFO] config:project:get-registries --> 200 (31 ms)
+[2026-09-23T00:40:05.223Z][INFO] project:resolve-packages <-- Request received
+params: {}
+[2026-09-23T00:40:05.361Z][INFO] project:list-packages --> 200 (392 ms)
+[2026-09-23T00:40:05.505Z][INFO] project:list-packages --> 200 (372 ms)
+[2026-09-23T00:40:07.267Z][WARN] Requested version [2.3.0] for package [com.unity.xr.core-utils] overridden by minimum version [2.6.0].
+[2026-09-23T00:40:07.267Z][WARN] Requested version [2.1.2] for package [com.unity.xr.legacyinputhelpers] overridden by minimum version [3.0.1].
+[2026-09-23T00:40:07.267Z][WARN] Requested version [6.6.0] for package [com.unity.xr.arfoundation] overridden by minimum version [6.6.2].
+[2026-09-23T00:40:07.267Z][WARN] Requested version [2.3.0] for package [com.unity.xr.compositionlayers] overridden by minimum version [2.5.0].
+[2026-09-23T00:40:07.267Z][WARN] Requested version [4.9.3] for package [com.unity.searcher] overridden by minimum version [4.9.5].
+[2026-09-23T00:40:07.269Z][INFO] project:resolve-packages --> 200 (2046 ms)
+[2026-09-23T00:40:30.697Z][INFO] Shutting down UnityPackageManager.exe: parent process [2356] is no longer running.

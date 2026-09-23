@@ -1,0 +1,2017 @@
+using System;
+using System.Linq;
+using UnityEditor;
+using UnityEditor.SceneManagement;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using UnityEngine.UI;
+using UnityEngine.XR.Hands;
+using UnityEngine.XR.Hands.Samples.VisualizerSample;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using Unity.XR.CoreUtils;
+using Gundam.Cockpit;
+
+namespace Gundam.EditorTools
+{
+    /// <summary>
+    /// One-click generator for the Gundam cockpit prototype scene.
+    /// Run this AFTER the project has finished resolving the XR packages added
+    /// to Packages/manifest.json (open the project once, let Package Manager
+    /// finish importing, then use the menu below).
+    ///
+    /// Menu: Gundam > Build Cockpit Scene
+    /// </summary>
+    public static class GundamCockpitSetup
+    {
+        const string ScenePath = "Assets/Scenes/GundamCockpit.unity";
+
+        // Imported Gundam FBX (see PlaceExternalGundam below). If this path
+        // ever changes (re-import under a new name, etc.) update it here -
+        // this is the single source of truth Build Cockpit Scene reads from.
+        const string GundamModelPath = "Assets/Models/Gundam/Mobile Suit Gundam-52dddca0b3f82f4705b1562457f679a8.fbx";
+
+        // Base color texture for ExternalGundam (per request - "건담 색깔
+        // 다운해둠"), applied in PlaceExternalGundam below. Before this, the
+        // model only had its single flat gray default material.
+        const string GundamBaseColorTexturePath = "Assets/Models/Gundam/Mobile Suit Gundam-baseColor.png";
+
+        // Enemy Zaku model + its own base color texture (per request -
+        // "자쿠 모델링이랑... 자쿠는 적으로 만들거야 자쿠를 적으로 배치해줘").
+        // See PlaceZakuEnemy below.
+        const string ZakuModelPath = "Assets/Models/Zaku/Green Zaku Mobile Suit-aca4bc150af72115520493e85c7e2457.fbx";
+        const string ZakuTexturePath = "Assets/Models/Zaku/ZakuTexture.png";
+
+        // Shared "how tall a mobile suit should read as" convention, reused
+        // for the enemy Zaku so it reads at the same scale as the player's
+        // own Gundam rather than needing its own separately-tuned number.
+        const float MobileSuitTargetHeight = 18f;
+
+        // An unnamed layer index used ONLY to hide ExternalGundam's own body
+        // from the player's own (XR) camera - see PlaceExternalGundam (sets
+        // the layer) and CreateXROrigin (excludes it from viewCamera's
+        // cullingMask). Doesn't need a name in Tag Manager to work, and 30 is
+        // one of the two layers Unity itself never assigns to anything by
+        // default, so it's very unlikely to collide with anything else in
+        // this project.
+        const int GundamBodyLayer = 30;
+
+        // XR Hands package's official "HandVisualizer" sample (Window >
+        // Package Manager > XR Hands > Samples > HandVisualizer) - imported
+        // once already at this path. Drives REAL rigged/skinned hand
+        // meshes from live XRHandSubsystem joint data (not a 21-joint
+        // sphere debug rig, not a controller model) - see
+        // BuildHandVisualizer below. "AndroidXR" variants are the ones
+        // that match this project's target device (Galaxy XR); the plain
+        // ones are wired in too as a harmless fallback for any other
+        // runtime the same build might run on.
+        const string HandVisSampleRoot = "Assets/Samples/XR Hands/1.6.3/HandVisualizer/";
+        const string HandVisAndroidLeftMeshPath = HandVisSampleRoot + "Models/LeftHandAndroidXR.fbx";
+        const string HandVisAndroidRightMeshPath = HandVisSampleRoot + "Models/RightHandAndroidXR.fbx";
+        const string HandVisFallbackLeftMeshPath = HandVisSampleRoot + "Models/LeftHand.fbx";
+        const string HandVisFallbackRightMeshPath = HandVisSampleRoot + "Models/RightHand.fbx";
+        const string HandVisMaterialPath = HandVisSampleRoot + "Materials/HandsDefaultMaterial.mat";
+        const string HandVisJointPrefabPath = HandVisSampleRoot + "Prefabs/Joint.prefab";
+        const string HandVisVelocityPrefabPath = HandVisSampleRoot + "Prefabs/VelocityPrefab.prefab";
+
+        [MenuItem("Gundam/Build Cockpit Scene")]
+        public static void BuildCockpitScene()
+        {
+            Scene scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+
+            CreateLighting();
+
+            GameObject suitRoot = new GameObject("MobileSuitRoot");
+            ShipMovementController ship = suitRoot.AddComponent<ShipMovementController>();
+
+            GameObject interior = new GameObject("CockpitInterior");
+            interior.transform.SetParent(suitRoot.transform, false);
+
+            // ---------------------------------------------------------------
+            // Materials — dark mecha interior body with glowing instrument
+            // panels/buttons/grips. Kept as shared materials (cheap, and easy
+            // to retint later from one place).
+            // ---------------------------------------------------------------
+            Material hullMat = MakeMat(new Color(0.045f, 0.045f, 0.05f));           // main dark armor/frame
+            Material hullAccentMat = MakeMat(new Color(0.11f, 0.11f, 0.13f));       // panel plates (dash, walls)
+            Material seatMat = MakeMat(new Color(0.07f, 0.07f, 0.085f));
+            Material seatAccentMat = MakeMat(new Color(0.035f, 0.035f, 0.045f));
+            Material gearMat = MakeMat(new Color(0.35f, 0.35f, 0.38f));             // metallic collars/gears
+            Material displayMat = MakeEmissiveMat(new Color(0.02f, 0.05f, 0.07f), new Color(0f, 0.65f, 0.8f));
+            Material buttonGreenMat = MakeEmissiveMat(new Color(0.02f, 0.05f, 0.03f), new Color(0.2f, 1f, 0.35f));
+            Material buttonRedMat = MakeEmissiveMat(new Color(0.05f, 0.01f, 0.01f), new Color(1f, 0.15f, 0.1f));
+            Material leftAccentMat = MakeEmissiveMat(new Color(0.04f, 0.09f, 0.18f), new Color(0.15f, 0.55f, 1f));   // steering (blue)
+            Material rightAccentMat = MakeEmissiveMat(new Color(0.18f, 0.03f, 0.03f), new Color(1f, 0.2f, 0.15f));   // weapon (red)
+            Material targetMat = MakeEmissiveMat(new Color(0.3f, 0.05f, 0.02f), new Color(1f, 0.35f, 0.05f));
+            Material starMat = MakeEmissiveMat(Color.black, Color.white);
+            Material hudLineMat = MakeEmissiveMat(new Color(0.05f, 0.08f, 0.1f), new Color(0.6f, 0.85f, 1f));   // OrbitHUD ring ticks
+            Material hudGateMat = MakeEmissiveMat(new Color(0.12f, 0.09f, 0.01f), new Color(1f, 0.82f, 0.15f)); // OrbitHUD gate markers
+
+            // --- Seat (bucket seat with headrest + side bolsters, on a pedestal) ---
+            BuildSeat(interior.transform, seatMat, seatAccentMat, hullMat);
+
+            // The old physical dashboard console (gauges + button grid) has
+            // also been removed - its informational role is now entirely
+            // taken over by the three System Check screens below ("데시보드
+            // 역할이 아까 만든 디스플레이 3개가 하는거야").
+
+            // --- External Gundam model - placed BEFORE the enclosure/dashboard
+            //     below so its head-cam RenderTexture (if the FBX is already
+            //     imported) can be piped straight onto both the
+            //     SystemCheckDisplay screen and the Cockpit_Dome. Standing out
+            //     in space in front of the cockpit, per request ("방금 만든
+            //     Gundam FBX 모델을 현재
+            //     gundam game 프로젝트에 추가해줘... 콕핏 앞쪽 가상 공간에
+            //     배치한다"). NOT Transform-parented under suitRoot/
+            //     MobileSuitRoot (see PlaceExternalGundam's own comment on why -
+            //     it still doesn't inherit the suit's rotation), but per report
+            //     ("LeftJoystick을 움직여도 실제 Gundam이 움직이는 것이 화면에서
+            //     보이지 않는다") it's now kept in sync with MobileSuitRoot's
+            //     POSITION via ExternalGundamFollower below - HeadCam (parented
+            //     deep inside this model's own Head bone) is what actually
+            //     generates the Cockpit_Dome/aux-screen exterior feed, so without
+            //     this the player's own movement was invisible in that feed even
+            //     though MobileSuitRoot itself was moving correctly. ---
+            GundamPlacementResult gundamResult = PlaceExternalGundam();
+            RenderTexture gundamHeadCamTex = gundamResult != null ? gundamResult.headCamTex : null;
+            RenderTexture gundamHeadCam360CubeTex = gundamResult != null ? gundamResult.headCam360CubemapTex : null;
+
+            if (gundamResult != null && gundamResult.instance != null)
+            {
+                ExternalGundamFollower follower = gundamResult.instance.AddComponent<ExternalGundamFollower>();
+                follower.target = suitRoot.transform;
+            }
+
+            // --- Enemy Zaku - per request ("자쿠를 적으로 배치해줘") ---
+            PlaceZakuEnemy();
+
+            // --- Full 360-degree solid enclosure (floor + an inward-facing
+            //     curved dome) so the real room/Skybox is never visible in
+            //     any direction, even as the real XR camera height varies
+            //     with headset tracking. Always kept in sync with this
+            //     generator so "Build Cockpit Scene" never regresses it. ---
+            // The old structural frame (side pillars/rails/braces/wall
+            // panels) has been removed per request ("옆에 벽이랑 기둥은
+            // 없애도 되고") - it was largely redundant now that the dome
+            // encloses the space, and it was blocking the view of it.
+            //
+            // Moved to run AFTER PlaceExternalGundam (was before it) so the
+            // live head-cam RenderTexture it creates already exists here and
+            // can be painted directly onto the dome - see
+            // BuildCockpitEnclosure for why, per request ("콕피트에서 밖에가
+            // 보이면안됨 콕피트에 외관은 전부 디스플레이어야해").
+            BuildCockpitEnclosure(interior.transform, hullAccentMat, gundamHeadCamTex, gundamHeadCam360CubeTex);
+
+            // --- Front display: "SYSTEM CHECK" style dashboard - one large
+            //     center screen (radial tick dial + pilot/weapon/ammo
+            //     readout) flanked by two smaller aux screens, replacing the
+            //     old plain curved windshield + corner HUD per request. The
+            //     left aux screen now shows a live camera feed from the
+            //     Gundam's head (see gundamHeadCamTex above), per request
+            //     ("건담에 머리에 시선이 내 콕핏 화면에 나와야해"). ---
+            BuildSystemCheckDisplay(interior.transform, displayMat, hullMat, gundamHeadCamTex,
+                out Text telemetryText, out Text weaponNameText, out Text ammoText);
+
+            // --- Orbit/HUD ring: a big floating compass-style reticle overlaying
+            //     the live head-cam view now shown on the dome itself (per request,
+            //     with a reference photo of an anime cockpit HUD ring + trajectory
+            //     "gate" markers: "콕핏에 외관에 구형이 있어서 그 구형에 밖에가 보이면서
+            //     저런 표식으로 궤도를 알려주는 시스템이 있어야해"). ---
+            BuildOrbitHUD(interior.transform, hudLineMat, hudGateMat);
+
+            // --- Hand trackers (placed under the XR Origin once it is created below) ---
+            HandJointTracker leftHand = CreateHandTracker("LeftHandTracker", Handedness.Left);
+            HandJointTracker rightHand = CreateHandTracker("RightHandTracker", Handedness.Right);
+
+            // --- Joysticks: visually distinct left (steer/blue) vs right (weapon/red) ---
+            // Each stick only accepts ITS OWN hand tracker (the other hand's
+            // slot is passed as null) - LeftJoystick can only be grabbed by
+            // the left hand, RightJoystick only by the right hand. Per
+            // request: "LeftJoystick: 왼손으로 잡음... RightJoystick: 오른손으로
+            // 잡음". RightJoystick previously also accepted the left hand
+            // tracker (a leftover from before this hand-exclusivity rule
+            // existed) - fixed here so grabbing is exclusive per stick.
+            //
+            // Position moved from the seat armrests up into the SystemCheckDisplay
+            // cluster's own area - per request ("조종장치에 위치가 디스플레이
+            // 3개 사이에 그쯤에 있어야할거같아"). The 3 screens sit at:
+            // center (0, 0.92, 0.4), left (-0.3536, 0.92, 0.2713), right
+            // (0.3536, 0.92, 0.2713) - see BuildSystemCheckDisplay/
+            // CreatePolarScreen. (+-0.22, 0.82, 0.18) sits roughly in the
+            // gap among all three (closer to center than the old armrest
+            // spot, slightly below/in front of the display height/depth)
+            // rather than tucked under the seat's side bolsters.
+            //
+            // Note: this is noticeably closer to the display panels than the
+            // old armrest position was (which was deliberately kept ~0.35 -
+            // its "grab+frame radius" - away from the aux screens to avoid
+            // visual overlap). I can't check in the Editor whether the grip
+            // now visually clips into a display frame from this angle - if
+            // it looks like it's poking into a screen when you check, tell
+            // me and I'll pull it back a bit.
+            //
+            // Per report ("조종기를 조금 위쪽으로 올린다"): Y raised a modest
+            // 0.05m (0.82 -> 0.87), X/Z left exactly as they were. ---
+            JoystickLever leftStick = CreateJoystick("LeftJoystick", interior.transform,
+                new Vector3(-0.22f, 0.87f, 0.18f), false, leftAccentMat, buttonGreenMat,
+                leftHand, null);
+            JoystickLever rightStick = CreateJoystick("RightJoystick", interior.transform,
+                new Vector3(0.22f, 0.87f, 0.18f), true, rightAccentMat, buttonRedMat,
+                null, rightHand);
+
+            ship.leftStick = leftStick;
+
+            // --- Gun turret (mounted on the suit, aimed by the right stick) ---
+            GameObject turretRoot = new GameObject("GunTurret");
+            turretRoot.transform.SetParent(suitRoot.transform, false);
+            turretRoot.transform.localPosition = new Vector3(0, 1.0f, 2.4f);
+
+            GameObject gunPivot = new GameObject("GunPivot");
+            gunPivot.transform.SetParent(turretRoot.transform, false);
+
+            CreateCylinder("GunHousing", gunPivot.transform, new Vector3(0, 0, 0.1f), new Vector3(0.14f, 0.14f, 0.2f), hullMat)
+                .transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            GameObject barrel = CreateCylinder("Barrel", gunPivot.transform, new Vector3(0, 0, 0.45f), new Vector3(0.07f, 0.5f, 0.07f), gearMat);
+            barrel.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+
+            GameObject muzzle = new GameObject("MuzzlePoint");
+            muzzle.transform.SetParent(gunPivot.transform, false);
+            muzzle.transform.localPosition = new Vector3(0, 0, 0.95f);
+
+            WeaponAimFireController weapon = suitRoot.AddComponent<WeaponAimFireController>();
+            weapon.rightStick = rightStick;
+            weapon.gunPivot = gunPivot.transform;
+            weapon.muzzlePoint = muzzle.transform;
+
+            CockpitHUD hud = suitRoot.AddComponent<CockpitHUD>();
+            hud.leftStick = leftStick;
+            hud.rightStick = rightStick;
+            hud.infoText = telemetryText;
+            hud.weapon = weapon;
+            hud.weaponNameText = weaponNameText;
+            hud.ammoText = ammoText;
+
+            // --- XR Origin (camera + hand tracking space) ---
+            // Y is 0, not a seat-height offset: the Starter Assets XR Origin's
+            // Tracking Origin Mode is "Not Specified", which real OpenXR
+            // runtimes resolve to Floor tracking - meaning the runtime camera
+            // Y is ALREADY the player's real head height above their real
+            // floor. Adding an extra authored offset here would stack on top
+            // of that and put the camera far above the seat (this previously
+            // caused a "camera too high" complaint). With Y=0, the cockpit's
+            // local floor (y=0) lines up with the player's real floor, and
+            // Floor tracking naturally places their eyes near the seat's
+            // headrest height when they're actually sitting.
+            GameObject xrOrigin = CreateXROrigin(suitRoot.transform, new Vector3(0, 0f, -0.15f));
+            leftHand.transform.SetParent(xrOrigin.transform, false);
+            rightHand.transform.SetParent(xrOrigin.transform, false);
+
+            // --- Real XR hand visuals (Galaxy XR hand tracking -> visible
+            //     rigged hand meshes, no controller model, no debug joint
+            //     spheres) - per request. See BuildHandVisualizer below. ---
+            BuildHandVisualizer(xrOrigin, leftHand, rightHand);
+
+            // --- Real XR Interaction Toolkit hand grab, wired onto the joysticks
+            //     now that xrOrigin (and its own "Left Hand"/"Right Hand" Near-Far
+            //     Interactors, from the imported "Hands Interaction Demo" sample)
+            //     actually exists - per request ("XR Interaction Toolkit의 실제
+            //     Hand Interactor/Direct Interactor를 사용... Grab 판정이 제대로
+            //     되도록"). Has to happen here, not inside CreateJoystick above,
+            //     for the same reason the head-turn wiring above does: the rig
+            //     doesn't exist yet when the joysticks are built. See
+            //     AttachHandInteractable below for what this actually adds. ---
+            WireJoystickHandInteractors(xrOrigin, leftStick, rightStick);
+
+            // Wire the pilot's own view camera into the Gundam's head-turn
+            // tracking, now that CreateXROrigin has actually created it - per
+            // request ("내가 머리를 돌리면 건담 머리도 돌아야해"). Has to
+            // happen here (not inside PlaceExternalGundam, which runs earlier)
+            // because the XR rig/camera doesn't exist yet at that point.
+            if (gundamResult != null && gundamResult.headCam360 != null)
+            {
+                Camera playerViewCamera = xrOrigin.GetComponentInChildren<Camera>(true);
+                if (playerViewCamera != null)
+                {
+                    gundamResult.headCam360.playerCamera = playerViewCamera.transform;
+                }
+                else
+                {
+                    Debug.LogWarning("[Gundam] Could not find the XR rig's camera to drive the Gundam's head-turn tracking.");
+                }
+            }
+
+            // --- Targets to shoot at — pushed out to the sides/above-below so they
+            //     sit in the open space around the front display, not stacked
+            //     directly behind it. Kept in world space, not parented to the suit. ---
+            GameObject targetsRoot = new GameObject("Targets");
+            System.Random rnd = new System.Random(1234);
+            for (int i = 0; i < 6; i++)
+            {
+                float side = (i % 2 == 0) ? -1f : 1f;
+                float x = side * (float)(3.5 + rnd.NextDouble() * 9.0);   // |x| in [3.5, 12.5] — outside the display's cone
+                float y = (float)(rnd.NextDouble() * 6.0 - 1.0);          // spread above/below eye height too
+                float z = 12f + i * 6f;
+                GameObject t = CreateCube($"Target_{i}", targetsRoot.transform, new Vector3(x, y, z), Vector3.one * 0.8f, targetMat);
+                t.AddComponent<HitTarget>();
+            }
+
+            // --- Simple starfield for a sense of motion ---
+            GameObject starsRoot = new GameObject("Starfield");
+            for (int i = 0; i < 60; i++)
+            {
+                Vector3 dir = UnityEngine.Random.onUnitSphere;
+                Vector3 pos = dir * UnityEngine.Random.Range(25f, 70f);
+                GameObject star = CreateCube($"Star_{i}", starsRoot.transform, pos, Vector3.one * 0.25f, starMat);
+                Collider col = star.GetComponent<Collider>();
+                if (col != null) UnityEngine.Object.DestroyImmediate(col);
+            }
+
+            System.IO.Directory.CreateDirectory("Assets/Scenes");
+            EditorSceneManager.SaveScene(scene, ScenePath);
+            AddSceneToBuildSettings(ScenePath);
+
+            Selection.activeGameObject = suitRoot;
+            Debug.Log("[Gundam] Cockpit prototype scene (visual overhaul) built and saved at " + ScenePath +
+                       ". Open Project Settings > XR Plug-in Management to enable OpenXR + Hand Tracking if you haven't yet.");
+        }
+
+        // Where the head-cam feed is saved as a real asset (needs to be a
+        // persisted .renderTexture asset, not a plain "new RenderTexture(...)"
+        // - a runtime-only RenderTexture doesn't survive a scene save/reload,
+        // it would show up as a missing reference next time the project is
+        // opened). Re-run-safe: GetOrCreateHeadCamRenderTexture reuses this
+        // asset if Build Cockpit Scene is run again instead of recreating it.
+        const string HeadCamRenderTexturePath = "Assets/Models/Gundam/GundamHeadCam.renderTexture";
+
+        // Was 512 - per request ("건담시야로 보는 밖이 화질이 깨짐"): 512x512
+        // looked acceptable on the small aux screen it was originally built
+        // for, but the same texture is now ALSO stretched across the whole
+        // Cockpit_Dome (see BuildCockpitEnclosure), a much bigger surface -
+        // at that scale 512x512 reads as blocky/blurry up close. 1024 is a
+        // reasonable middle ground for a mobile XR headset (this camera
+        // renders every frame, so resolution isn't free) - tell me if it's
+        // still not sharp enough (I can go higher) or if it costs too much
+        // frame rate (I'll pull it back down).
+        const int HeadCamResolution = 1024;
+
+        // Persisted cubemap asset for the dome's 360-degree live feed - see
+        // GetOrCreateHeadCam360CubemapRenderTexture, MakeCubemapScreenMat, and
+        // GundamHeadCam360.cs's "cubemap" field. Needs to be a real saved asset
+        // for the same reason HeadCamRenderTexturePath above is (survives scene
+        // save/reload without going missing), and separate from the flat
+        // headCamTex asset since this one is a Cube-dimension RenderTexture, not
+        // a plain 2D one.
+        const string HeadCam360CubemapRenderTexturePath = "Assets/Models/Gundam/GundamHeadCam360.renderTexture";
+
+        // Per-face resolution. Was implicitly 256 (GundamHeadCam360's old
+        // transient-only default) back when this cubemap only ever fed the
+        // Skybox, which the solid Cockpit_Dome always fully occludes anyway (so
+        // it was never actually visible). Now that Cockpit_Dome itself samples
+        // this cubemap directly (see MakeCubemapScreenMat), it's worth a bit
+        // more resolution - 512 is a reasonable middle ground for a mobile XR
+        // headset (6 faces re-rendered every frame isn't free); tell me if it
+        // still isn't sharp enough or if it costs too much frame rate.
+        const int HeadCam360CubemapResolution = 512;
+
+        // ---------------------------------------------------------------
+        // External Gundam model — instantiates the imported FBX (see
+        // GundamModelPath above) and stands it in world space out in front
+        // of the cockpit, for an initial "does it show up correctly" test
+        // placement. Per request, this only gets the model displaying
+        // normally for now — no animation, AI, or interaction logic yet.
+        //
+        // The FBX already has a proper 22-bone biped skeleton + single skinned
+        // mesh (Root -> Hips -> Spine/Spine1/Spine2 -> {Neck->Head,
+        // LeftShoulder/RightShoulder chains, arms/hands}, plus separate
+        // LeftUpLeg/RightUpLeg leg chains from Hips) - per request ("FBX
+        // 내부에 실제 본/메시 구조가 이미 있다면 임의로 다시 만들지 말고 기존
+        // 구조를 최대한 유지한다") that internal hierarchy is left completely
+        // untouched; this just renames/positions the single instantiated
+        // root object rather than rebuilding any Body/Head/Arms/Legs
+        // grouping around it.
+        //
+        // Also attaches a camera to the rig's own "Head" bone and feeds it to
+        // a RenderTexture, so the Gundam's point of view can be shown on one
+        // of the cockpit's screens - per request ("건담에 머리에 시선이 내
+        // 콕핏 화면에 나와야해"). Returns that RenderTexture (or null if the
+        // FBX isn't imported yet, or no "Head" bone was found) so the caller
+        // can wire it into BuildSystemCheckDisplay.
+        // ---------------------------------------------------------------
+        /// <summary>Everything BuildCockpitScene needs back from PlaceExternalGundam:
+        /// the aux-screen RenderTexture, and (once CreateXROrigin has created the XR
+        /// rig further down) the GundamHeadCam360 component to wire the player's
+        /// camera into for head-tracking. A plain class (not a struct) so it can be
+        /// returned as null when the model/Head bone weren't found.</summary>
+        class GundamPlacementResult
+        {
+            public RenderTexture headCamTex;
+            public GundamHeadCam360 headCam360;
+            // Added for the Cockpit_Dome 360-cubemap fix (see MakeCubemapScreenMat) -
+            // the SAME persisted cubemap asset GundamHeadCam360 renders into every
+            // frame, so BuildCockpitEnclosure can sample it directly on the dome
+            // instead of the old flat 2D headCamTex stretched over the whole sphere.
+            public RenderTexture headCam360CubemapTex;
+            // Added per report ("LeftJoystick을 움직여도 실제 Gundam이 움직이는
+            // 것이 화면에서 보이지 않는다"): the root GameObject ("ExternalGundam")
+            // that HeadCam (the camera actually feeding the dome/aux-screen exterior
+            // view) is parented under - see PlaceExternalGundam's own comment on why
+            // it was originally kept fixed in world space. BuildCockpitScene uses
+            // this to attach ExternalGundamFollower once suitRoot exists, so that
+            // camera moves together with the player instead of staying frozen.
+            public GameObject instance;
+        }
+
+        static GundamPlacementResult PlaceExternalGundam()
+        {
+            GameObject fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(GundamModelPath);
+            if (fbxAsset == null)
+            {
+                // Expected the FIRST time this runs right after the FBX file is
+                // copied in: Unity only turns a raw file on disk into a loadable
+                // asset once its own import pipeline has run (Assets > Refresh,
+                // or reopening the project). Doesn't fail the rest of the scene
+                // build - just skips the model (and the head-cam feed) and logs why.
+                Debug.LogWarning("[Gundam] Could not load the Gundam FBX at '" + GundamModelPath +
+                    "'. If you just added this file, do Assets > Refresh (or reopen the project) " +
+                    "so Unity imports it, then re-run Gundam > Build Cockpit Scene.");
+                return null;
+            }
+
+            GameObject instance = (GameObject)PrefabUtility.InstantiatePrefab(fbxAsset);
+            instance.name = "ExternalGundam";
+            instance.transform.SetParent(null); // explicit: world space, not under MobileSuitRoot
+
+            // Raw FBX bounding box (via assimp info, since I can't open the
+            // Unity Editor myself to read the actual post-import numbers):
+            // min (-0.222, -0.156, 0.000), max (0.222, 0.156, 0.985) - Z is by
+            // far the tallest axis (0.985) with min Z exactly 0, so this reads
+            // as a Z-up export with the pivot at the feet. Unity's FBX importer
+            // converts to Y-up on import using the file's own declared up-axis,
+            // so this SHOULD come in standing upright already with feet at
+            // local Y=0 - but I can't visually confirm that without you
+            // checking in the Editor. If it's lying down or rotated, tell me
+            // and I'll add a corrective rotation here.
+            //
+            // Scale: target a canonical mecha height of ~18m (RX-78-2-scale
+            // Gundam) from that raw 0.985-unit height.
+            const float rawHeight = 0.985469f;
+            const float targetHeight = 18f;
+            float scale = targetHeight / rawHeight;
+
+            // Standing distance: clearly outside the Cockpit_Dome (its front
+            // edge sits around local Z ~= 3.6-3.9 - see BuildCockpitEnclosure/
+            // BuildOrbitHUD) and well short of the existing Targets (Z 12-42),
+            // so it's an unmistakable, easy-to-spot test placement straight
+            // ahead of the pilot without overlapping the cockpit or camera.
+            instance.transform.position = new Vector3(0f, 0f, 20f);
+            instance.transform.rotation = Quaternion.identity;
+            instance.transform.localScale = Vector3.one * scale;
+
+            // Hide this body from the pilot's own DIRECT first-person view -
+            // see GundamBodyLayer above and CreateXROrigin below (excludes
+            // this layer from the main XR view camera's cullingMask), so
+            // ExternalGundam (a separate floating object, not part of the
+            // player's own suit) never appears to the pilot as some other
+            // robot floating in front of them.
+            //
+            // The head-cam below now DELIBERATELY does NOT exclude this layer
+            // (see its cullingMask comment) - per the latest request ("건담에
+            // 머리는 안보이는데 몸통은 보였으면 좋겠어"), the pilot wants to
+            // see their own torso/shoulders in that self-view feed, just not
+            // the head.
+            SetLayerRecursively(instance, GundamBodyLayer);
+
+            // Base color texture (per request - "건담 색깔 다운해둠") - was
+            // previously just a flat gray default material since no texture
+            // had been provided yet.
+            Texture2D gundamBaseColor = AssetDatabase.LoadAssetAtPath<Texture2D>(GundamBaseColorTexturePath);
+            ApplyBaseColorTexture(instance, gundamBaseColor, "ExternalGundam");
+
+            Debug.Log("[Gundam] Placed ExternalGundam at " + instance.transform.position +
+                " with scale " + scale.ToString("0.00") + "x (targeting ~" + targetHeight + "m tall). " +
+                "Single skinned mesh, 22-bone biped rig" +
+                (gundamBaseColor != null ? ", base color texture applied." : ", no texture found (still flat gray)."));
+
+            // --- Head camera: find the rig's own "Head" bone (already part of
+            //     its real skeleton - not something invented here) and attach
+            //     a small camera to it, feeding a RenderTexture that
+            //     BuildSystemCheckDisplay puts on one of the cockpit screens. ---
+            Transform head = FindDeepChild(instance.transform, "Head");
+            if (head == null)
+            {
+                Debug.LogWarning("[Gundam] Could not find a 'Head' bone under ExternalGundam - skipping the " +
+                    "head-cam feed. (Expected 'Root/Hips/Spine/Spine1/Spine2/Neck/Head' per the rig's own hierarchy.)");
+                return null;
+            }
+
+            RenderTexture headCamTex = GetOrCreateHeadCamRenderTexture();
+
+            // Positioned from the mesh's ACTUAL rendered bounds, not the Head
+            // bone's raw local pivot. Fix for a reported bug: placing the
+            // camera exactly at the bone's local origin produced a hazy,
+            // uniform gray feed (screenshot showed the OrbitHUD ring against
+            // flat fog instead of clean stars) - the bone's pivot sits INSIDE
+            // the head geometry (common for auto-rigged bones, which are
+            // often placed at a body part's center rather than its surface),
+            // so the camera was rendering the model's own inner surface (the
+            // single flat gray "DefaultMaterial") at point-blank range.
+            //
+            // Follow-up request: that "above the head" placement looked too
+            // high (like a drone shot, not a pilot's eyes), so this now aims
+            // for roughly eye level instead. Eye level sits INSIDE the head's
+            // vertical range, so simply lowering Y to a proportional height
+            // (while keeping X/Z at the raw geometric center of the ENTIRE
+            // mesh) would risk landing back inside the head/neck volume and
+            // reintroducing the same gray-fog bug - the old fix only worked
+            // by trivially going above ALL geometry, where X/Z didn't matter.
+            // To avoid that, the camera is also nudged forward along +Z (the
+            // same "facing forward" direction already assumed for the look
+            // rotation below), which should move it from the center of the
+            // head mass toward the face's front surface. The forward nudge
+            // is sized as a fraction of the model's total height (not its
+            // bounding depth, which can be inflated by outstretched arms or
+            // a held weapon) so it scales sensibly with the model's size.
+            // Both the 92%-of-height eye estimate and the 4%-of-height
+            // forward nudge are estimates I can't visually verify myself -
+            // if the feed goes hazy/gray again (camera still embedded) or
+            // still looks off, tell me which and I'll adjust the fractions.
+            SkinnedMeshRenderer meshRenderer = instance.GetComponentInChildren<SkinnedMeshRenderer>();
+            Bounds meshBounds = meshRenderer != null ? meshRenderer.bounds : new Bounds(head.position, Vector3.one);
+
+            float eyeHeight = meshBounds.min.y + meshBounds.size.y * 0.92f;
+            float forwardClearance = meshBounds.size.y * 0.04f;
+
+            GameObject camGo = new GameObject("HeadCam");
+            camGo.transform.position = new Vector3(meshBounds.center.x, eyeHeight, meshBounds.center.z + forwardClearance);
+            // Faces the same world +Z "forward" everything else in this scene
+            // uses (Targets/OrbitHUD are both built along +Z) - a reasonable
+            // default since ExternalGundam's own actual facing direction
+            // isn't confirmed; tell me if the feed looks like it's facing the
+            // wrong way and I'll rotate this.
+            camGo.transform.rotation = Quaternion.LookRotation(Vector3.forward, Vector3.up);
+            // Parented to the Head bone (worldPositionStays: true, so the
+            // position/rotation just set are kept) purely so this camera
+            // keeps following the bone's position AND its head-turn-tracking
+            // rotation (see GundamHeadCam360) as the pilot looks around.
+            camGo.transform.SetParent(head, true);
+
+            Camera headCam = camGo.AddComponent<Camera>();
+            headCam.targetTexture = headCamTex;
+            headCam.fieldOfView = 60f;
+            headCam.nearClipPlane = 0.05f;
+            headCam.clearFlags = CameraClearFlags.SolidColor;
+            headCam.backgroundColor = new Color(0.01f, 0.01f, 0.025f, 1f); // same deep-space color as the main view
+
+            // REVERSED per latest request ("건담에 머리는 안보이는데 몸통은
+            // 보였으면 좋겠어" - head should stay hidden, but the torso should
+            // be visible). This used to exclude GundamBodyLayer entirely (see
+            // git history / earlier comment here) because the chest/shoulders
+            // showing up at the bottom of frame read as "seeing my own robot's
+            // body from outside itself" once the same feed got stretched
+            // across the whole Cockpit_Dome - but the pilot now wants exactly
+            // that self-view back for the torso specifically. headCam is left
+            // at its default "sees everything" mask (no exclusion) here; the
+            // head itself should still stay out of frame on its own, since
+            // this camera sits essentially AT the head's own front surface
+            // (see eyeHeight/forwardClearance above) facing outward/forward -
+            // the head geometry is beside/behind the lens, not in front of it,
+            // while the torso/shoulders (lower and further from the camera)
+            // sit squarely in the forward view. This is a geometry-based
+            // assumption I can't visually verify myself - if the head DOES
+            // still show up somewhere (e.g. looking straight down), tell me
+            // and I'll add a proper shader-based height clip instead of
+            // relying on the camera's position/FOV alone.
+            //
+            // Note: the MAIN player-view camera (see CreateXROrigin below)
+            // still excludes GundamBodyLayer - that one is unrelated to this
+            // headCam self-view and still hides ExternalGundam (a separate
+            // floating object, not part of the player's own suit) from the
+            // pilot's direct first-person view.
+
+            Debug.Log("[Gundam] Head camera attached to the '" + head.name + "' bone, feeding RenderTexture at " +
+                HeadCamRenderTexturePath + ".");
+
+            // --- 360-degree cockpit background: the SAME head camera also
+            //     feeds a live cubemap Skybox, so wherever the pilot looks
+            //     around the cockpit's dark enclosure, they see what the
+            //     Gundam's head sees in every direction - per request
+            //     ("콕핏에 검정부분에서 건담에 머리부분에서 보이는거 처럼
+            //     해야해 360도로"). CreateXROrigin below switches the view
+            //     camera to CameraClearFlags.Skybox once RenderSettings.skybox
+            //     is set here (falls back to the old flat SolidColor
+            //     background if this shader isn't found for some reason). ---
+            Shader skyboxShader = Shader.Find("Skybox/Cubemap");
+            GundamHeadCam360 cam360 = null;
+            RenderTexture headCam360CubemapTex = null;
+            if (skyboxShader != null)
+            {
+                Material skyboxMat = new Material(skyboxShader);
+                skyboxMat.name = "GundamHeadCam360_Skybox";
+                RenderSettings.skybox = skyboxMat;
+
+                // Persisted asset (not a transient runtime-only cubemap) so
+                // BuildCockpitEnclosure below can wire the SAME texture into
+                // Cockpit_Dome's own material - see GetOrCreateHeadCam360CubemapRenderTexture
+                // and MakeCubemapScreenMat. Per request ("밖에 자쿠가 보이지 않아"):
+                // this is the actual fix for that - see the comment on
+                // MakeCubemapScreenMat for why the old flat-image approach missed it.
+                headCam360CubemapTex = GetOrCreateHeadCam360CubemapRenderTexture();
+
+                cam360 = camGo.AddComponent<GundamHeadCam360>();
+                cam360.headCam = headCam;
+                cam360.skyboxMaterial = skyboxMat;
+                cam360.head = head;
+                cam360.cubemap = headCam360CubemapTex;
+                // cam360.playerCamera is wired up by BuildCockpitScene right after
+                // CreateXROrigin runs (that happens after this method returns) -
+                // per request ("내가 머리를 돌리면 건담 머리도 돌아야해") so the
+                // Gundam's head turns to match the pilot's own look direction.
+
+                Debug.Log("[Gundam] 360-degree head-cam skybox wired up - the cockpit's surrounding view should now live-feed from the Gundam's head.");
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Could not find the built-in 'Skybox/Cubemap' shader - skipping the " +
+                    "360 background (the flat head-cam screen on the left aux display still works).");
+            }
+
+            return new GundamPlacementResult { headCamTex = headCamTex, headCam360 = cam360, headCam360CubemapTex = headCam360CubemapTex, instance = instance };
+        }
+
+        // ---------------------------------------------------------------
+        // Enemy Zaku - per request ("자쿠 모델링이랑 건담 색깔 다운해둠 자쿠는
+        // 적으로 만들거야 자쿠를 적으로 배치해줘"). Placed out in world space
+        // beyond ExternalGundam, facing back toward it - just placement +
+        // an EnemyMarker tag for now, no AI/combat behavior yet (that's a
+        // separate, later step per the request - "지금은... 먼저 완성해라").
+        // Same defensive "not imported yet" handling as PlaceExternalGundam
+        // above (never fails the rest of the scene build).
+        // ---------------------------------------------------------------
+        static void PlaceZakuEnemy()
+        {
+            GameObject fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuModelPath);
+            if (fbxAsset == null)
+            {
+                Debug.LogWarning("[Gundam] Could not load the Zaku FBX at '" + ZakuModelPath +
+                    "'. If you just added this file, do Assets > Refresh (or reopen the project) " +
+                    "so Unity imports it, then re-run Gundam > Build Cockpit Scene.");
+                return;
+            }
+
+            GameObject instance = (GameObject)PrefabUtility.InstantiatePrefab(fbxAsset);
+            instance.name = "ZakuEnemy";
+            instance.transform.SetParent(null); // world space, same as ExternalGundam - not part of the player's own suit
+
+            // Beyond ExternalGundam (which stands at Z=20) so the two read
+            // as separate mobile suits facing off in open space, not
+            // overlapping. Facing back toward the player (180 degrees from
+            // ExternalGundam/the cockpit's own forward) rather than facing
+            // away.
+            instance.transform.position = new Vector3(0f, 0f, 40f);
+            instance.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+
+            // Scaled from the model's OWN actual imported bounds (whatever
+            // raw scale this particular FBX ships at) to the same ~18m
+            // mobile-suit-height convention ExternalGundam uses, rather than
+            // a hardcoded number guessed without opening the file.
+            SkinnedMeshRenderer meshRenderer = instance.GetComponentInChildren<SkinnedMeshRenderer>();
+            if (meshRenderer != null && meshRenderer.bounds.size.y > 0.0001f)
+            {
+                float scale = MobileSuitTargetHeight / meshRenderer.bounds.size.y;
+                instance.transform.localScale = Vector3.one * scale;
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Could not measure ZakuEnemy's mesh bounds to auto-scale it to ~" +
+                    MobileSuitTargetHeight + "m - it may be the wrong size. Adjust its Scale by hand if so.");
+            }
+
+            Texture2D zakuTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuTexturePath);
+            ApplyBaseColorTexture(instance, zakuTexture, "ZakuEnemy");
+
+            // Tag only, for now - no AI/aiming/health/combat logic yet (see
+            // Gundam.Cockpit.EnemyMarker). Runtime behavior for this belongs
+            // in its own script file, not here, once it's actually needed.
+            instance.AddComponent<EnemyMarker>();
+
+            Debug.Log("[Gundam] Placed ZakuEnemy at " + instance.transform.position +
+                " (facing the player's Gundam)" +
+                (zakuTexture != null ? ", base color texture applied." : ", no texture found (flat default material)."));
+        }
+
+        // Applies a base color/albedo texture to every material used by
+        // every renderer under root - shader-agnostic (uses Material.mainTexture,
+        // which Unity resolves to whichever property a given shader tags as
+        // its main texture, e.g. URP Lit's _BaseMap) rather than assuming a
+        // specific shader/property name. Shared by both ExternalGundam and
+        // ZakuEnemy above.
+        static void ApplyBaseColorTexture(GameObject root, Texture2D texture, string label)
+        {
+            if (texture == null)
+            {
+                Debug.LogWarning("[Gundam] No base color texture found for " + label + " - it will keep its default/flat material.");
+                return;
+            }
+
+            // Bug fix: this used to mutate renderer.sharedMaterials[i] in
+            // place. Both ExternalGundam and ZakuEnemy came in with no real
+            // material of their own (both FBX imports fell back to the same
+            // shared default/no-texture material), so mutating that shared
+            // asset for one model bled its texture onto every OTHER model
+            // still pointing at the same material - reported as "자쿠
+            // 색깔이 건담한테도 들어갔는데" (Zaku's texture ended up on the
+            // Gundam too). Fix: give each model its OWN material instance
+            // (a copy) before touching its texture, so setting one model's
+            // texture can never affect another model that happened to share
+            // the same starting material.
+            foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] materials = renderer.sharedMaterials;
+                for (int i = 0; i < materials.Length; i++)
+                {
+                    if (materials[i] == null) continue;
+
+                    Material uniqueMat = new Material(materials[i]);
+                    uniqueMat.name = materials[i].name + " (" + label + ")";
+                    uniqueMat.mainTexture = texture;
+                    materials[i] = uniqueMat;
+                }
+                renderer.sharedMaterials = materials;
+            }
+        }
+
+        /// <summary>Recursively searches a transform and all its descendants for a child
+        /// with the given name (case-insensitive) - used to find the "Head" bone inside
+        /// the Gundam FBX's own skeleton without assuming its exact depth/path.</summary>
+        static Transform FindDeepChild(Transform root, string name)
+        {
+            if (root.name.Equals(name, StringComparison.OrdinalIgnoreCase)) return root;
+            for (int i = 0; i < root.childCount; i++)
+            {
+                Transform found = FindDeepChild(root.GetChild(i), name);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        /// <summary>Sets a GameObject and every descendant to the given layer - used to put
+        /// ExternalGundam's whole hierarchy (mesh + every bone) on GundamBodyLayer in one go.</summary>
+        static void SetLayerRecursively(GameObject go, int layer)
+        {
+            go.layer = layer;
+            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                SetLayerRecursively(go.transform.GetChild(i).gameObject, layer);
+            }
+        }
+
+        /// <summary>Loads the head-cam RenderTexture asset if Build Cockpit Scene already
+        /// created one on a previous run, otherwise creates and saves a fresh one. Must be
+        /// a real saved asset (not just "new RenderTexture(...)") so the Camera/RawImage
+        /// references to it survive a scene save and project reopen.</summary>
+        static RenderTexture GetOrCreateHeadCamRenderTexture()
+        {
+            RenderTexture existing = AssetDatabase.LoadAssetAtPath<RenderTexture>(HeadCamRenderTexturePath);
+            if (existing != null)
+            {
+                // Upgrade an already-existing asset (from an earlier, lower-res
+                // run of this generator) in place rather than leaving it stale -
+                // changing HeadCamResolution above wouldn't otherwise do
+                // anything once this .renderTexture asset already exists on
+                // disk, since this method would just keep returning it as-is.
+                // Resizing the SAME asset (instead of deleting/recreating it)
+                // keeps its GUID, so the aux screen's RawImage, the dome's
+                // material, and headCam.targetTexture all keep pointing at it
+                // correctly with nothing left dangling.
+                if (existing.width != HeadCamResolution || existing.height != HeadCamResolution)
+                {
+                    existing.Release();
+                    existing.width = HeadCamResolution;
+                    existing.height = HeadCamResolution;
+                    existing.Create();
+                    EditorUtility.SetDirty(existing);
+                    AssetDatabase.SaveAssets();
+                    Debug.Log("[Gundam] Upgraded the existing GundamHeadCam RenderTexture to " + HeadCamResolution + "x" +
+                        HeadCamResolution + " (was lower-res) for a sharper feed on the dome/aux screen.");
+                }
+                return existing;
+            }
+
+            RenderTexture rt = new RenderTexture(HeadCamResolution, HeadCamResolution, 16);
+            rt.name = "GundamHeadCam";
+            AssetDatabase.CreateAsset(rt, HeadCamRenderTexturePath);
+            return rt;
+        }
+
+        /// <summary>Same idea as GetOrCreateHeadCamRenderTexture above, but for the
+        /// Cube-dimension RenderTexture that feeds both RenderSettings.skybox and (new)
+        /// Cockpit_Dome's own 360-degree material - see MakeCubemapScreenMat and
+        /// GundamHeadCam360.cs's "cubemap" field. Re-run-safe: reuses/upgrades the same
+        /// saved asset in place (keeping its GUID) rather than recreating it, same
+        /// reasoning as the flat texture's version.</summary>
+        static RenderTexture GetOrCreateHeadCam360CubemapRenderTexture()
+        {
+            RenderTexture existing = AssetDatabase.LoadAssetAtPath<RenderTexture>(HeadCam360CubemapRenderTexturePath);
+            if (existing != null)
+            {
+                if (existing.width != HeadCam360CubemapResolution ||
+                    existing.dimension != UnityEngine.Rendering.TextureDimension.Cube)
+                {
+                    existing.Release();
+                    existing.width = HeadCam360CubemapResolution;
+                    existing.height = HeadCam360CubemapResolution;
+                    existing.dimension = UnityEngine.Rendering.TextureDimension.Cube;
+                    existing.Create();
+                    EditorUtility.SetDirty(existing);
+                    AssetDatabase.SaveAssets();
+                    Debug.Log("[Gundam] Upgraded the existing GundamHeadCam360 cubemap RenderTexture to " +
+                        HeadCam360CubemapResolution + "x" + HeadCam360CubemapResolution + " per face (Cube dimension).");
+                }
+                return existing;
+            }
+
+            RenderTexture rt = new RenderTexture(HeadCam360CubemapResolution, HeadCam360CubemapResolution, 16);
+            rt.dimension = UnityEngine.Rendering.TextureDimension.Cube;
+            rt.name = "GundamHeadCam360Cubemap";
+            AssetDatabase.CreateAsset(rt, HeadCam360CubemapRenderTexturePath);
+            return rt;
+        }
+
+        static void CreateLighting()
+        {
+            GameObject lightGo = new GameObject("Directional Light");
+            Light light = lightGo.AddComponent<Light>();
+            light.type = LightType.Directional;
+            light.intensity = 1.0f;
+            lightGo.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
+
+            // Soft cool fill light inside the cockpit only (short range) so the
+            // dark interior still reads as "dark cabin + glowing panels" instead
+            // of pitch black, without brightening the exterior/targets/starfield.
+            GameObject fillGo = new GameObject("Cockpit_FillLight");
+            Light fill = fillGo.AddComponent<Light>();
+            fill.type = LightType.Point;
+            fill.color = new Color(0.55f, 0.75f, 1f);
+            fill.intensity = 0.6f;
+            fill.range = 3.5f;
+            fillGo.transform.position = new Vector3(0f, 1.6f, 0.6f);
+        }
+
+        // ---------------------------------------------------------------
+        // Seat
+        // ---------------------------------------------------------------
+        static void BuildSeat(Transform interior, Material seatMat, Material seatAccentMat, Material hullMat)
+        {
+            CreateCylinder("Seat_Base", interior, new Vector3(0, 0.18f, -0.25f), new Vector3(0.28f, 0.18f, 0.28f), hullMat);
+            CreateCube("Seat_Pan", interior, new Vector3(0, 0.42f, -0.25f), new Vector3(0.55f, 0.12f, 0.55f), seatMat);
+
+            GameObject back = CreateCube("Seat_Back", interior, new Vector3(0, 0.85f, -0.5f), new Vector3(0.55f, 0.75f, 0.12f), seatMat);
+            back.transform.localRotation = Quaternion.Euler(8f, 0f, 0f);
+
+            GameObject headrest = CreateCube("Seat_Headrest", interior, new Vector3(0, 1.28f, -0.52f), new Vector3(0.4f, 0.22f, 0.12f), seatMat);
+            headrest.transform.localRotation = Quaternion.Euler(-6f, 0f, 0f);
+
+            GameObject bolsterL = CreateCube("Seat_Bolster_L", interior, new Vector3(-0.32f, 0.5f, -0.28f), new Vector3(0.1f, 0.2f, 0.55f), seatAccentMat);
+            bolsterL.transform.localRotation = Quaternion.Euler(0f, 0f, -12f);
+            GameObject bolsterR = CreateCube("Seat_Bolster_R", interior, new Vector3(0.32f, 0.5f, -0.28f), new Vector3(0.1f, 0.2f, 0.55f), seatAccentMat);
+            bolsterR.transform.localRotation = Quaternion.Euler(0f, 0f, 12f);
+        }
+
+        // ---------------------------------------------------------------
+        // Full 360-degree enclosure — a physical floor to stand/sit on,
+        // plus a single continuous curved "screen" dome that wraps every
+        // other direction (ceiling, rear, both sides, and the space above
+        // the seat's front too) as one seamless round surface instead of
+        // flat panels — "공간이 360도 전부 둥그런 화면이어야해". The dome is
+        // an ellipsoid (a Sphere primitive scaled non-uniformly), rendered
+        // inward-facing via Cull Front + Unlit so it's visible from inside
+        // and guarantees no real-world Skybox/passthrough is ever visible
+        // through a seam or gap the way separate flat walls could leave.
+        //
+        // Margins are generous on purpose: the Starter Assets XR Origin
+        // this rig is built from has m_RequestedTrackingOriginMode = "Not
+        // Specified", which most OpenXR runtimes resolve to real Floor
+        // tracking. That means the actual runtime camera Y is this
+        // transform's authored XR Origin offset (0) PLUS the player's REAL
+        // head height above their REAL floor - which can reach roughly
+        // 1.6-2.0m even sitting, more standing. A tight dome can end up
+        // with the camera embedded inside/above it, which looks like a
+        // solid black screen. Keep the dome well clear of that (same
+        // extents the old flat ceiling/walls used, which were already
+        // verified generous enough).
+        // ---------------------------------------------------------------
+        static void BuildCockpitEnclosure(Transform interior, Material hullAccentMat, RenderTexture liveHeadCamTex, RenderTexture liveHeadCam360CubeTex)
+        {
+            // Cockpit_Floor is still built (kept as a GameObject so it's one
+            // flag-flip to bring back) but its Renderer is switched OFF, same
+            // treatment as Cockpit_Dome below - per request ("콕피드 아래
+            // 바닥은 없어야하고... 건담에 머리에서 바라보고 있는 모습이
+            // 나와야해"): now that the whole surrounding view is meant to be
+            // what the Gundam's own head-cam sees, a flat little floor slab
+            // fixed to the cockpit's local space doesn't belong in that
+            // picture - the pilot should see the Gundam's actual point of
+            // view (the 360 head-cam skybox), not a room floor under their
+            // feet. The seat/dashboard/joysticks the pilot actually touches
+            // stay visible as before; only this floor prop is hidden.
+            GameObject floor = CreateCube("Cockpit_Floor", interior, new Vector3(0, -0.05f, 0.5f), new Vector3(4.0f, 0.1f, 5.4f), hullAccentMat);
+            Collider floorCol = floor.GetComponent<Collider>();
+            if (floorCol != null) UnityEngine.Object.DestroyImmediate(floorCol);
+            Renderer floorRenderer = floor.GetComponent<Renderer>();
+            if (floorRenderer != null) floorRenderer.enabled = false;
+
+            // Cockpit_Dome: EARLIER this was made invisible (Renderer off) so
+            // the real Starfield/skybox behind it would show through, per an
+            // earlier request to actually see "outside". Latest request
+            // reverses that ("콕피트에서 밖에가 보이면안됨 콕피트에 외관은
+            // 전부 디스플레이어야해 그래야 로봇안에 있는거지 로봇에 시점으로만
+            // 세상을 보는거야") - seeing a raw gap straight through to the
+            // background skybox reads as "floating in open space", not
+            // "sitting inside a sealed robot cockpit watching a screen". So
+            // the dome's Renderer is back ON (solid, no holes - the pilot can
+            // never see straight past it to anything else) and its material
+            // now shows the SAME live head-cam feed already piped onto the
+            // SysCheck_Left aux screen (liveHeadCamTex - see
+            // PlaceExternalGundam), via a plain URP Unlit material (same
+            // family MakeShellMat/every other material here already uses, so
+            // it's guaranteed to render correctly - unlike the raw legacy
+            // "Skybox/Cubemap" shader RenderSettings.skybox uses, which would
+            // very likely show as a broken/pink "unsupported shader" if
+            // applied directly to a regular mesh under URP).
+            //
+            // UPDATE per report ("밖에 자쿠가 보이지 않아"): the caveat below
+            // (flat 2D image stretched over a sphere) turned out to actually
+            // hide distant objects like ZakuEnemy, not just look a bit
+            // distorted - anything outside headCam's own narrow 60-degree
+            // forward cone at the instant of capture simply wasn't in that
+            // flat image at all, so no amount of UV-stretching could recover
+            // it. Fixed properly now: MakeCubemapScreenMat samples the SAME
+            // full 360-degree cubemap already being rendered every frame for
+            // RenderSettings.skybox (see GundamHeadCam360.cs), by real world
+            // direction, so every direction shows its own correct content -
+            // no stretching, and nothing missing regardless of where headCam
+            // happened to be facing. Falls back to the old flat-image
+            // material (MakeUnlitScreenMat), and finally to the plain static
+            // shell (MakeShellMat), if the cubemap or its shader aren't
+            // available for some reason - the pilot is never left with a
+            // hole to the void either way.
+            Vector3 domeCenter = new Vector3(0, 1.75f, 0.5f);
+            Vector3 domeScale = new Vector3(4.6f, 4.2f, 6.2f);
+            Material domeMat = MakeCubemapScreenMat(liveHeadCam360CubeTex);
+            if (domeMat == null && liveHeadCam360CubeTex != null)
+            {
+                Debug.LogWarning("[Gundam] Could not find the custom 'Custom/CockpitDomeCubemap' shader (expected at " +
+                    "Assets/Shaders/CockpitDomeCubemap.shader) - falling back to the old flat 2D head-cam image " +
+                    "stretched over the dome. That version WILL make distant objects (e.g. ZakuEnemy) hard or " +
+                    "impossible to make out. Make sure the shader file exists, then re-run Build Cockpit Scene.");
+            }
+            if (domeMat == null)
+            {
+                domeMat = liveHeadCamTex != null ? MakeUnlitScreenMat(liveHeadCamTex) : MakeShellMat();
+            }
+            GameObject dome = CreateSphere("Cockpit_Dome", interior, domeCenter, domeScale, domeMat);
+            Collider domeCol = dome.GetComponent<Collider>();
+            if (domeCol != null) UnityEngine.Object.DestroyImmediate(domeCol);
+            if (liveHeadCamTex == null && liveHeadCam360CubeTex == null)
+            {
+                Debug.LogWarning("[Gundam] Cockpit_Dome has no live head-cam feed yet (Gundam FBX/head-cam not " +
+                    "wired up) - using a static opaque shell for now. Re-run Build Cockpit Scene after the FBX is " +
+                    "imported to get the live view on the dome itself.");
+            }
+
+            // Canopy frame: thin structural ribs over the now-solid dome, so
+            // it still reads as a rounded canopy (with visible frame
+            // structure) rather than a plain sphere - per request (with a
+            // reference photo of a rounded glass canopy around the pilot):
+            // "이런식으로 콕핏이 구형으로 보여야해 그안에 있을때 구형안에 있는
+            // 느낌". These trace the SAME sphere as Cockpit_Dome (great-circle
+            // meridian bows + one equatorial ring, built from short beam
+            // segments since Unity has no curved primitive) - like a real
+            // canopy's frame bars over its glass/screen panes.
+            Material canopyFrameMat = MakeEmissiveMat(new Color(0.05f, 0.05f, 0.06f), new Color(0.08f, 0.1f, 0.14f));
+            BuildCanopyFrame(interior, domeCenter, domeScale * 0.5f, canopyFrameMat);
+        }
+
+        /// <summary>Thin structural ribs (great-circle meridian bows + one equatorial
+        /// ring) tracing the Cockpit_Dome's sphere, so its round shape/curvature is
+        /// visible even though the dome mesh itself stays invisible. Built from short
+        /// CreateBeam segments since Unity has no native curved-line primitive.</summary>
+        static void BuildCanopyFrame(Transform interior, Vector3 domeCenterLocal, Vector3 domeRadii, Material frameMat)
+        {
+            GameObject frameRoot = new GameObject("Canopy_Frame");
+            frameRoot.transform.SetParent(interior, false);
+
+            const int ribCount = 6;       // meridian bows, 30 degrees apart (each covers both sides of the sphere)
+            const int meridianSegments = 20;
+            const int equatorSegments = 24;
+            const float beamThickness = 0.025f;
+
+            for (int r = 0; r < ribCount; r++)
+            {
+                float theta = r * (180f / ribCount) * Mathf.Deg2Rad;
+                Vector3 prevPoint = Vector3.zero;
+                for (int s = 0; s <= meridianSegments; s++)
+                {
+                    float phi = s * (360f / meridianSegments) * Mathf.Deg2Rad;
+                    Vector3 unit = new Vector3(Mathf.Sin(phi) * Mathf.Cos(theta), Mathf.Cos(phi), Mathf.Sin(phi) * Mathf.Sin(theta));
+                    Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii);
+
+                    if (s > 0)
+                    {
+                        StripCollider(CreateBeam($"Canopy_Rib_{r}_{s}", frameRoot.transform, prevPoint, point, beamThickness, frameMat));
+                    }
+                    prevPoint = point;
+                }
+            }
+
+            // One equatorial ring (a horizontal band at the dome's own center
+            // height) tying the meridian bows together, like a canopy's side rail.
+            Vector3 prevLat = Vector3.zero;
+            for (int s = 0; s <= equatorSegments; s++)
+            {
+                float phi = s * (360f / equatorSegments) * Mathf.Deg2Rad;
+                Vector3 unit = new Vector3(Mathf.Cos(phi), 0f, Mathf.Sin(phi));
+                Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii);
+
+                if (s > 0)
+                {
+                    StripCollider(CreateBeam($"Canopy_EquatorRib_{s}", frameRoot.transform, prevLat, point, beamThickness, frameMat));
+                }
+                prevLat = point;
+            }
+        }
+
+        /// <summary>
+        /// Cull-Front + Unlit fallback shell material. Cull Front is required
+        /// because the camera sits INSIDE this cube (unlike every other wall
+        /// above, which the camera views from outside), so only the mesh's
+        /// back faces should render. Unlit (not Lit) matters too: those
+        /// visible back faces keep their outward-pointing normals, so a Lit
+        /// shader would compute lighting as if every face pointed away from
+        /// every light in the cockpit and render solid black. Unlit ignores
+        /// normals/lighting entirely and just shows the flat base color.
+        /// </summary>
+        static Material MakeShellMat()
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+            Material m = new Material(shader != null ? shader : Shader.Find("Unlit/Color"));
+            m.color = new Color(0.05f, 0.055f, 0.07f);
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 1f); // 1 = Front
+            return m;
+        }
+
+        /// <summary>Same URP Unlit + Cull-Front shell material as MakeShellMat, but with
+        /// a live RenderTexture (e.g. the Gundam's head-cam feed) as its base texture -
+        /// used to make Cockpit_Dome read as "a display showing the feed" rather than a
+        /// flat static color, per request ("콕피트에 외관은 전부 디스플레이어야해").
+        /// Deliberately the standard 2D Unlit shader (not the "Skybox/Cubemap" shader
+        /// RenderSettings.skybox uses) - that legacy shader isn't written for URP's
+        /// pipeline tags and would very likely render as a broken/pink "unsupported
+        /// shader" on a regular mesh, so this trades a perfectly seamless 360 wrap for a
+        /// guaranteed-to-render result.</summary>
+        static Material MakeUnlitScreenMat(RenderTexture tex)
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
+            Material m = new Material(shader != null ? shader : Shader.Find("Unlit/Texture"));
+            m.name = "Cockpit_Dome_LiveFeed";
+            m.mainTexture = tex;
+            if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 1f); // 1 = Front - visible from inside the dome
+            return m;
+        }
+
+        /// <summary>Proper 360-degree version of MakeUnlitScreenMat above - samples the
+        /// SAME live cubemap already being rendered every frame for RenderSettings.skybox
+        /// (see GundamHeadCam360.cs) using a small custom URP shader
+        /// (Assets/Shaders/CockpitDomeCubemap.shader), instead of stretching one flat 2D
+        /// image over the whole sphere. Per report ("밖에 자쿠가 보이지 않아") - the flat-
+        /// image approach only ever captured whatever was directly in headCam's own
+        /// 60-degree forward cone at the moment of capture, so anything outside that cone
+        /// (ZakuEnemy included, most of the time) was simply never in the image at all,
+        /// no matter how it got stretched around the sphere. A cubemap sampled by the true
+        /// world-space direction from the dome's surface (equivalent to "from roughly the
+        /// pilot's own head", since the dome is centered close to them) shows the CORRECT
+        /// content in every direction with no stretching - exactly like a normal skybox,
+        /// just rendered onto a regular mesh instead of used as the camera's background
+        /// (which would never actually be seen, since the dome fully encloses the camera).
+        /// Returns null (letting the caller fall back) if the cubemap texture or the
+        /// custom shader aren't available - e.g. the shader file was deleted, or an older
+        /// scene was built before this fix and hasn't been rebuilt yet.</summary>
+        static Material MakeCubemapScreenMat(RenderTexture cubemapTex)
+        {
+            if (cubemapTex == null) return null;
+            Shader shader = Shader.Find("Custom/CockpitDomeCubemap");
+            if (shader == null) return null;
+
+            Material m = new Material(shader);
+            m.name = "Cockpit_Dome_LiveFeed360";
+            if (m.HasProperty("_CubeTex")) m.SetTexture("_CubeTex", cubemapTex);
+            return m;
+        }
+
+        // ---------------------------------------------------------------
+        // Front display — "SYSTEM CHECK / BOOT CONFIGURATION" style mecha
+        // dashboard: one large center screen (radial tick dial + pilot/
+        // weapon/ammo readout) flanked by two smaller aux screens, a red
+        // accent bar underneath, and vertical tick-meter ladders at the far
+        // edges. Replaces the old plain curved-windshield + corner-HUD
+        // display entirely, per request ("지금 콕핏에 있는거 다지우고 이런거
+        // 만들어" against the reference screenshot). Everything here is
+        // built from primitives + procedural uGUI (no imported art), so it
+        // approximates the reference's look rather than reproducing it
+        // pixel-for-pixel.
+        //
+        // Mounted low and close, tilted up toward the pilot's face - a
+        // console sitting just above the thighs (like a real cockpit
+        // instrument panel), not a far-off eye-level windshield. Per
+        // request: "내가 앉은 자리에 허벅지쯤 위에 있는거야 이게".
+        // ---------------------------------------------------------------
+        static void BuildSystemCheckDisplay(Transform interior, Material screenMat, Material frameMat, RenderTexture headCamTex,
+            out Text telemetryText, out Text weaponNameText, out Text ammoText)
+        {
+            GameObject rootGo = new GameObject("SystemCheckDisplay");
+            rootGo.transform.SetParent(interior, false);
+
+            // Per report ("화면이 너무 가까이 붙어 보인다"): pulled back a modest
+            // 0.08m from the player (0.55 -> 0.63) - same orientation (tiltX,
+            // per-screen angleDeg) and the same relative Center/Left/Right
+            // angular layout, just a bit further along that same direction so
+            // the screens don't feel like they're pressed up against the face.
+            const float radius = 0.63f;   // was 0.55f - still within arm's reach
+            const float eyeZ = -0.15f;
+            const float baseY = 0.92f;    // low, just above the seated pilot's thighs
+            const float tiltX = 36f;      // tilted up so the pilot looking down sees it face-on
+
+            Transform centerScreen = CreatePolarScreen(rootGo.transform, "SysCheck_Center", 0f, radius, eyeZ, baseY, tiltX, 0.42f, 0.42f, frameMat, screenMat);
+            Transform leftScreen = CreatePolarScreen(rootGo.transform, "SysCheck_Left", -40f, radius, eyeZ, baseY, tiltX, 0.2f, 0.24f, frameMat, screenMat);
+            Transform rightScreen = CreatePolarScreen(rootGo.transform, "SysCheck_Right", 40f, radius, eyeZ, baseY, tiltX, 0.2f, 0.24f, frameMat, screenMat);
+
+            // Red accent bar under the center screen.
+            Material redAccentMat = MakeEmissiveMat(new Color(0.1f, 0.01f, 0.01f), new Color(1f, 0.15f, 0.1f));
+            CreatePolarScreen(rootGo.transform, "SysCheck_AccentBar", 0f, radius - 0.005f, eyeZ, baseY - 0.24f, tiltX, 0.36f, 0.015f, frameMat, redAccentMat);
+
+            // Vertical tick-meter ladders just outside the aux screens (world-space, purely decorative).
+            BuildTickLadder("SysCheck_TickLadder_L", interior, new Vector3(-0.52f, baseY, eyeZ + radius * 0.7f), frameMat);
+            BuildTickLadder("SysCheck_TickLadder_R", interior, new Vector3(0.52f, baseY, eyeZ + radius * 0.7f), frameMat);
+
+            // --- Center screen UI: title, radial tick dial, pilot/weapon/ammo readout ---
+            Canvas centerCanvas = CreateWorldCanvas("SysCheck_Canvas", centerScreen, new Vector2(760, 760), 0.00054f);
+            CreateUIImage("Backing", centerCanvas.transform, Vector2.zero, new Vector2(760, 760), new Color(0.02f, 0.03f, 0.08f, 0.75f));
+            CreateUIText("Title", centerCanvas.transform, new Vector2(0, 320), new Vector2(600, 50), 30, TextAnchor.MiddleCenter, new Color(0.75f, 0.85f, 1f), "SYSTEM CHECK");
+            CreateUIText("Subtitle", centerCanvas.transform, new Vector2(0, 280), new Vector2(600, 26), 15, TextAnchor.MiddleCenter, new Color(0.55f, 0.7f, 0.95f), "- BOOT CONFIGURATION -");
+            BuildTickRing(centerCanvas.transform, new Vector2(0, 10), 230f, 48);
+            CreateUIText("PilotLabel", centerCanvas.transform, new Vector2(0, 130), new Vector2(500, 24), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "PILOT: ---");
+            weaponNameText = CreateUIText("WeaponName", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "---");
+            ammoText = CreateUIText("AmmoReadout", centerCanvas.transform, new Vector2(0, -40), new Vector2(500, 30), 20, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "AMMO ---/---");
+            telemetryText = CreateUIText("Telemetry", centerCanvas.transform, new Vector2(0, -300), new Vector2(700, 70), 13, TextAnchor.UpperCenter, new Color(0.45f, 0.9f, 1f), "");
+
+            // --- Flanking aux screens: left screen shows the Gundam's head-cam
+            //     feed when available (per request: "건담에 머리에 시선이 내
+            //     콕핏 화면에 나와야해"); right screen keeps the original static
+            //     schematic decoration. ---
+            if (headCamTex != null)
+            {
+                BuildHeadCamScreenUI(leftScreen, headCamTex);
+            }
+            else
+            {
+                // Expected until the FBX is imported and Build Cockpit Scene is
+                // re-run (see PlaceExternalGundam) - falls back to the same
+                // static decoration as before rather than an empty screen.
+                BuildAuxScreenUI(leftScreen, "HEAD CAM - NO SIGNAL");
+            }
+            BuildAuxScreenUI(rightScreen, "AUX-R");
+        }
+
+        /// <summary>Left aux screen content when the Gundam's head camera feed is available:
+        /// a label plus a live RawImage of the head-cam RenderTexture (see PlaceExternalGundam).</summary>
+        static void BuildHeadCamScreenUI(Transform screen, RenderTexture tex)
+        {
+            Canvas canvas = CreateWorldCanvas("HeadCam_Canvas", screen, new Vector2(380, 440), 0.00047f);
+            CreateUIImage("Backing", canvas.transform, Vector2.zero, new Vector2(380, 440), new Color(0.02f, 0.03f, 0.08f, 0.7f));
+            CreateUIText("Label", canvas.transform, new Vector2(0, 190), new Vector2(300, 30), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "HEAD CAM");
+
+            GameObject feedGo = new GameObject("Feed");
+            RectTransform feedRect = feedGo.AddComponent<RectTransform>();
+            feedGo.transform.SetParent(canvas.transform, false);
+            feedRect.anchorMin = feedRect.anchorMax = new Vector2(0.5f, 0.5f);
+            feedRect.pivot = new Vector2(0.5f, 0.5f);
+            feedRect.anchoredPosition = new Vector2(0, -20);
+            feedRect.sizeDelta = new Vector2(340, 340);
+
+            RawImage feed = feedGo.AddComponent<RawImage>();
+            feed.texture = tex;
+        }
+
+        /// <summary>A flat display panel (with a slightly larger backing frame) positioned on
+        /// the polar arc around the pilot's eye point, tilted to face them. Returns the
+        /// inner "screen" transform (the emissive face) to anchor a Canvas or further children on.</summary>
+        static Transform CreatePolarScreen(Transform parent, string name, float angleDeg, float radius, float eyeZ, float baseY,
+            float tiltX, float width, float height, Material frameMat, Material screenMat)
+        {
+            float angleRad = angleDeg * Mathf.Deg2Rad;
+            float x = radius * Mathf.Sin(angleRad);
+            float z = eyeZ + radius * Mathf.Cos(angleRad);
+
+            GameObject root = new GameObject(name);
+            root.transform.SetParent(parent, false);
+            root.transform.localPosition = new Vector3(x, baseY, z);
+            root.transform.localRotation = Quaternion.Euler(tiltX, angleDeg, 0f);
+
+            CreateCube(name + "_Frame", root.transform, Vector3.zero, new Vector3(width + 0.06f, height + 0.06f, 0.03f), frameMat);
+            GameObject screen = CreateCube(name + "_Screen", root.transform, new Vector3(0, 0, -0.02f), new Vector3(width, height, 0.02f), screenMat);
+            return screen.transform;
+        }
+
+        /// <summary>A column of short tick marks (like a fuel/pressure ladder gauge) bolted
+        /// to the frame at the far edge of the cockpit - purely decorative, no live data.</summary>
+        static void BuildTickLadder(string name, Transform parent, Vector3 centerPos, Material mat)
+        {
+            GameObject root = new GameObject(name);
+            root.transform.SetParent(parent, false);
+            root.transform.localPosition = centerPos;
+
+            const int count = 14;
+            const float spacing = 0.09f;
+            float startY = -(count - 1) * spacing * 0.5f;
+            for (int i = 0; i < count; i++)
+            {
+                float len = (i % 3 == 0) ? 0.09f : 0.05f;
+                CreateCube($"{name}_Tick_{i}", root.transform, new Vector3(0, startY + i * spacing, 0), new Vector3(len, 0.012f, 0.012f), mat);
+            }
+        }
+
+        /// <summary>A World Space Canvas anchored just in front of a display panel's screen face.</summary>
+        static Canvas CreateWorldCanvas(string name, Transform anchor, Vector2 sizeDelta, float worldScale)
+        {
+            GameObject canvasGo = new GameObject(name);
+            RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
+            canvasGo.transform.SetParent(anchor, false);
+            canvasGo.transform.localPosition = new Vector3(0, 0, -0.015f);
+            canvasGo.transform.localRotation = Quaternion.identity;
+            canvasGo.transform.localScale = Vector3.one * worldScale;
+            canvasRect.sizeDelta = sizeDelta;
+
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvasGo.AddComponent<CanvasScaler>();
+            return canvas;
+        }
+
+        /// <summary>A ring of radial tick marks (like the reference's circular dial),
+        /// with every 6th tick drawn longer/brighter as a "major" mark.</summary>
+        static void BuildTickRing(Transform parent, Vector2 center, float radius, int count)
+        {
+            GameObject ringGo = new GameObject("TickRing");
+            RectTransform ringRect = ringGo.AddComponent<RectTransform>();
+            ringGo.transform.SetParent(parent, false);
+            ringRect.anchorMin = ringRect.anchorMax = new Vector2(0.5f, 0.5f);
+            ringRect.pivot = new Vector2(0.5f, 0.5f);
+            ringRect.anchoredPosition = center;
+            ringRect.sizeDelta = Vector2.zero;
+
+            for (int i = 0; i < count; i++)
+            {
+                float angle = (360f / count) * i;
+                float rad = angle * Mathf.Deg2Rad;
+                Vector2 dir = new Vector2(Mathf.Sin(rad), Mathf.Cos(rad));
+                bool major = (i % 6 == 0);
+
+                GameObject tick = new GameObject($"Tick_{i}");
+                RectTransform tickRect = tick.AddComponent<RectTransform>();
+                tick.transform.SetParent(ringGo.transform, false);
+                tickRect.anchorMin = tickRect.anchorMax = new Vector2(0.5f, 0.5f);
+                tickRect.pivot = new Vector2(0.5f, 0f);
+                tickRect.sizeDelta = new Vector2(major ? 5f : 3f, major ? 30f : 16f);
+                tickRect.anchoredPosition = dir * radius;
+                tickRect.localRotation = Quaternion.Euler(0f, 0f, -angle);
+
+                Image img = tick.AddComponent<Image>();
+                img.color = major ? new Color(0.75f, 0.9f, 1f, 0.95f) : new Color(0.45f, 0.65f, 0.9f, 0.7f);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Orbit/HUD ring — a big floating compass-style reticle made of
+        // real 3D tick marks (the same "ring of ticks" idea as BuildTickRing
+        // above, per the same reference style), but built in world space
+        // instead of on a flat UI Canvas so it floats directly in the
+        // pilot's forward view, overlaying the outside seen through the
+        // transparent Cockpit_Dome, rather than being confined to a small
+        // console monitor. A few ticks are drawn as brighter yellow "gate"
+        // markers (paired angled bars) standing in for the reference's
+        // trajectory/waypoint marks. Static/decorative for now - no live
+        // orbit or trajectory data is computed, same as the console's dial.
+        // ---------------------------------------------------------------
+        static Transform BuildOrbitHUD(Transform interior, Material lineMat, Material gateMat)
+        {
+            GameObject hudRoot = new GameObject("OrbitHUD");
+            hudRoot.transform.SetParent(interior, false);
+
+            // Centered on the forward view: well above/past the low
+            // SystemCheckDisplay console (baseY 0.92, radius 0.55) and well
+            // inside the enclosing Cockpit_Dome (half-extents in the
+            // several-meter range), so this reads as a big HUD ring
+            // floating over the outside view rather than overlapping
+            // either of those.
+            const float centerY = 1.45f;
+            const float centerZ = 2.4f;
+            const float ringRadius = 1.5f;
+            hudRoot.transform.localPosition = new Vector3(0f, centerY, centerZ);
+
+            const int tickCount = 60;   // every 6 degrees
+            const int gateEvery = 15;   // 4 gate markers spaced evenly around the ring
+
+            for (int i = 0; i < tickCount; i++)
+            {
+                float angle = i * (360f / tickCount);
+                float rad = angle * Mathf.Deg2Rad;
+                Vector3 dir = new Vector3(Mathf.Sin(rad), Mathf.Cos(rad), 0f);
+
+                if (i % gateEvery == 0)
+                {
+                    BuildOrbitGateMark(hudRoot.transform, dir * ringRadius, angle, gateMat);
+                }
+                else
+                {
+                    bool major = (i % 5 == 0);
+                    GameObject tick = CreateCube($"OrbitHUD_Tick_{i}", hudRoot.transform, dir * ringRadius,
+                        new Vector3(0.02f, major ? 0.16f : 0.09f, 0.02f), lineMat);
+                    tick.transform.localRotation = Quaternion.Euler(0f, 0f, -angle);
+                    StripCollider(tick);
+                }
+            }
+
+            return hudRoot.transform;
+        }
+
+        /// <summary>A paired-diagonal-bar "gate" marker on the OrbitHUD ring, standing in for
+        /// a trajectory/waypoint tick (the reference image's brighter angled double marks).</summary>
+        static void BuildOrbitGateMark(Transform parent, Vector3 pos, float angle, Material mat)
+        {
+            GameObject gate = new GameObject("OrbitHUD_Gate");
+            gate.transform.SetParent(parent, false);
+            gate.transform.localPosition = pos;
+            gate.transform.localRotation = Quaternion.Euler(0f, 0f, -angle);
+
+            GameObject barA = CreateCube("Bar_A", gate.transform, new Vector3(-0.035f, 0f, 0f), new Vector3(0.022f, 0.22f, 0.022f), mat);
+            barA.transform.localRotation = Quaternion.Euler(0f, 0f, 25f);
+            StripCollider(barA);
+
+            GameObject barB = CreateCube("Bar_B", gate.transform, new Vector3(0.035f, 0f, 0f), new Vector3(0.022f, 0.22f, 0.022f), mat);
+            barB.transform.localRotation = Quaternion.Euler(0f, 0f, 25f);
+            StripCollider(barB);
+        }
+
+        static void StripCollider(GameObject go)
+        {
+            Collider col = go.GetComponent<Collider>();
+            if (col != null) UnityEngine.Object.DestroyImmediate(col);
+        }
+
+        /// <summary>Simple schematic-style filler for the two smaller flanking screens - a
+        /// label plus a few thin bars, standing in for the reference's wireframe diagrams
+        /// without needing imported art. Static, no live data.</summary>
+        static void BuildAuxScreenUI(Transform screen, string label)
+        {
+            Canvas canvas = CreateWorldCanvas(label + "_Canvas", screen, new Vector2(380, 440), 0.00047f);
+            CreateUIImage("Backing", canvas.transform, Vector2.zero, new Vector2(380, 440), new Color(0.02f, 0.03f, 0.08f, 0.7f));
+            CreateUIText("Label", canvas.transform, new Vector2(0, 190), new Vector2(300, 30), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), label);
+
+            for (int i = 0; i < 6; i++)
+            {
+                float y = 120f - i * 40f;
+                float w = 260f - (i % 3) * 60f;
+                CreateUIImage($"Line_{i}", canvas.transform, new Vector2(0, y), new Vector2(w, 6f), new Color(0.35f, 0.55f, 0.85f, 0.5f));
+            }
+        }
+
+        static Text CreateUIText(string name, Transform parent, Vector2 anchoredPos, Vector2 size, int fontSize,
+            TextAnchor align, Color color, string content)
+        {
+            GameObject go = new GameObject(name);
+            RectTransform rect = go.AddComponent<RectTransform>();
+            go.transform.SetParent(parent, false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = anchoredPos;
+            rect.sizeDelta = size;
+
+            Text text = go.AddComponent<Text>();
+            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            text.fontSize = fontSize;
+            text.alignment = align;
+            text.color = color;
+            text.text = content;
+            return text;
+        }
+
+        static Image CreateUIImage(string name, Transform parent, Vector2 anchoredPos, Vector2 size, Color color)
+        {
+            GameObject go = new GameObject(name);
+            RectTransform rect = go.AddComponent<RectTransform>();
+            go.transform.SetParent(parent, false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = anchoredPos;
+            rect.sizeDelta = size;
+
+            Image img = go.AddComponent<Image>();
+            img.color = color;
+            return img;
+        }
+
+        static HandJointTracker CreateHandTracker(string name, Handedness handedness)
+        {
+            GameObject go = new GameObject(name);
+            XRHandTrackingEvents events = go.AddComponent<XRHandTrackingEvents>();
+            HandJointTracker tracker = go.AddComponent<HandJointTracker>();
+            tracker.handedness = handedness;
+            events.handedness = handedness;
+            return tracker;
+        }
+
+        // ---------------------------------------------------------------
+        // Real XR hand visuals - per request ("Galaxy XR 실제 손 추적 데이터를
+        // 이용한 '보이는 XR 손'", "21개 관절을 구형 오브젝트로 표시하는 디버그
+        // 방식은 사용하지 마", "컨트롤러 모델이 게임 안에 나타나는 것도 원하지
+        // 않는다"). Uses the XR Hands package's OWN official "HandVisualizer"
+        // sample component rather than anything custom-built here - it
+        // already does exactly this: drives a real rigged/skinned hand MESH
+        // (SkinnedMeshRenderer + XRHandSkeletonDriver bone-by-bone) from
+        // live XRHandSubsystem joint data, shows it only while that hand is
+        // actually tracked, and hides it the instant tracking is lost (see
+        // HandVisualizer.cs's OnTrackingAcquired/OnTrackingLost). Nothing
+        // about this needs a controller - it reads XRHandSubsystem directly,
+        // completely separate from any XRController/interaction-profile
+        // input path.
+        //
+        // IMPORTANT (found by directly inspecting the imported prefab's own
+        // source file, after "hands still don't show" was reported again):
+        // the "XR Origin Hands (XR Rig)" prefab from the "Hands Interaction
+        // Demo" sample - the one CreateXROrigin actually instantiates -
+        // ALREADY ships with its own "Hand Visualizer" child object, and it's
+        // already fully wired: drawMeshes=true, m_AndroidXRLeftHandMesh/
+        // m_AndroidXRRightHandMesh already pointing at real rigged meshes.
+        // Adding a SECOND HandVisualizer here (the old behavior) just
+        // duplicated it - two independent hand renderers, parented in two
+        // different places - which was never going to fix "hands don't show"
+        // and could only add confusion (or a second, differently-positioned
+        // set of hand meshes). So this now only builds one from scratch as a
+        // fallback, if the instantiated rig does NOT already have one (e.g.
+        // the minimal placeholder rig CreateXROrigin falls back to when the
+        // sample isn't imported yet).
+        //
+        // debugDrawJoints is left OFF - only the mesh (drawMeshes) is shown.
+        // The component still wants non-null debugDrawPrefab/velocityPrefab
+        // references even with those features off (it's part of its fixed
+        // internal wiring), but with debugDrawJoints=false and
+        // velocityType=None those objects are created disabled and never
+        // rendered - no spheres ever appear.
+        // ---------------------------------------------------------------
+        static void BuildHandVisualizer(GameObject xrOrigin, HandJointTracker leftHandTracker, HandJointTracker rightHandTracker)
+        {
+            HandVisualizer existingVisualizer = xrOrigin.GetComponentInChildren<HandVisualizer>(true);
+            if (existingVisualizer != null)
+            {
+                Debug.Log("[Gundam] Using the XR rig's own built-in Hand Visualizer ('" + existingVisualizer.gameObject.name +
+                    "') - it already ships with real Android XR hand meshes wired up (drawMeshes=true), so no duplicate " +
+                    "was added. If hands still don't render on-device, the problem is upstream of this scene (hand-tracking " +
+                    "data not actually reaching the app - see the log line right after this one, and check the headset's " +
+                    "OWN system settings for a hands-vs-controllers input toggle, not just this project's OpenXR settings).");
+            }
+            else
+            {
+                GameObject androidLeft = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisAndroidLeftMeshPath);
+                GameObject androidRight = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisAndroidRightMeshPath);
+                GameObject fallbackLeft = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisFallbackLeftMeshPath);
+                GameObject fallbackRight = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisFallbackRightMeshPath);
+                Material handMat = AssetDatabase.LoadAssetAtPath<Material>(HandVisMaterialPath);
+                GameObject jointDebugPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisJointPrefabPath);
+                GameObject velocityPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(HandVisVelocityPrefabPath);
+
+                if (androidLeft == null || androidRight == null || jointDebugPrefab == null || velocityPrefab == null)
+                {
+                    Debug.LogWarning("[Gundam] Could not load the XR Hands 'HandVisualizer' sample assets under '" + HandVisSampleRoot +
+                        "' - real hand meshes will NOT be set up this run. In the Editor: Window > Package Manager > XR Hands > " +
+                        "Samples tab > import 'HandVisualizer', then re-run Gundam > Build Cockpit Scene.");
+                }
+                else
+                {
+                    GameObject handVisGo = new GameObject("HandVisualizer");
+                    // Directly under the XR Origin, same as leftHandTracker/rightHandTracker
+                    // above - joint poses from XRHandSubsystem are reported in the XR
+                    // Origin's own local tracking space.
+                    handVisGo.transform.SetParent(xrOrigin.transform, false);
+                    handVisGo.transform.localPosition = Vector3.zero;
+                    handVisGo.transform.localRotation = Quaternion.identity;
+
+                    HandVisualizer handVisualizer = handVisGo.AddComponent<HandVisualizer>();
+
+                    // HandVisualizer's mesh/prefab/material fields are private
+                    // [SerializeField]s with no public setters, so they're assigned
+                    // through SerializedObject here (standard way to configure a
+                    // third-party component's inspector-only fields from an editor
+                    // script) rather than reflection or a custom subclass.
+                    SerializedObject so = new SerializedObject(handVisualizer);
+                    so.FindProperty("m_AndroidXRLeftHandMesh").objectReferenceValue = androidLeft;
+                    so.FindProperty("m_AndroidXRRightHandMesh").objectReferenceValue = androidRight;
+                    if (fallbackLeft != null) so.FindProperty("m_MetaQuestLeftHandMesh").objectReferenceValue = fallbackLeft;
+                    if (fallbackRight != null) so.FindProperty("m_MetaQuestRightHandMesh").objectReferenceValue = fallbackRight;
+                    if (handMat != null) so.FindProperty("m_HandMeshMaterial").objectReferenceValue = handMat;
+                    so.FindProperty("m_DebugDrawPrefab").objectReferenceValue = jointDebugPrefab;
+                    so.FindProperty("m_VelocityPrefab").objectReferenceValue = velocityPrefab;
+                    so.ApplyModifiedProperties();
+
+                    handVisualizer.drawMeshes = true;
+                    handVisualizer.debugDrawJoints = false; // no visible joint spheres - real hand mesh only
+                    handVisualizer.velocityType = HandVisualizer.VelocityType.None;
+                }
+            }
+
+            // Minimal on-device confirmation logging (per request: "손 추적이
+            // 정상적으로 들어오는지 확인할 수 있는 최소한의 로그") - attached to
+            // the XR Origin itself (not the HandVisualizer, which may not
+            // exist as a new object anymore - see above) so it's always
+            // created regardless of which branch above ran. Runtime behavior
+            // lives in its own script file, not here (this file only builds
+            // scene structure). This reads OUR OWN HandJointTracker instances
+            // (used by JoystickLever's grab logic), which is a completely
+            // separate path from whichever HandVisualizer renders the mesh -
+            // so this logger's ACQUIRED/LOST lines are the ones that tell you
+            // whether the joysticks should be grabbable, independent of
+            // whether the hand mesh itself is visible.
+            HandTrackingStatusLogger logger = xrOrigin.AddComponent<HandTrackingStatusLogger>();
+            logger.leftHandTracker = leftHandTracker;
+            logger.rightHandTracker = rightHandTracker;
+
+            // One-shot boot diagnostic - per request ("XRHandSubsystem 존재
+            // 여부 / running 여부 / left/right tracked 여부... 매 프레임 로그를
+            // 찍지는 마라"): logs exactly once (a few seconds after start, to
+            // give OpenXR time to spin up), straight from the runtime
+            // XRHandSubsystem itself rather than from any of this project's
+            // own scripts - see HandSubsystemBootDiagnostics.cs for what each
+            // outcome means. This is the log to check first after a device
+            // run: if it says the subsystem isn't running or isn't tracking
+            // either hand, that's outside this project (the headset/OS not
+            // handing hand data to the app), no matter how this scene or its
+            // scripts are wired.
+            xrOrigin.AddComponent<HandSubsystemBootDiagnostics>();
+
+            // Defensive - per request ("컨트롤러 모델이 게임 안에 나타나는 것도
+            // 원하지 않는다"): the imported "XR Origin Hands (XR Rig)" sample
+            // was checked and does NOT contain any controller mesh (only
+            // hand pinch/poke/aim logic), so this is normally a no-op. It
+            // guards against one appearing if the rig prefab or its
+            // packages/samples are ever re-imported or changed later.
+            DisableAnyControllerVisuals(xrOrigin);
+        }
+
+        static void DisableAnyControllerVisuals(GameObject root)
+        {
+            foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(true))
+            {
+                if (renderer.gameObject.name.IndexOf("Controller", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    renderer.gameObject.SetActive(false);
+                    Debug.Log("[Gundam] Disabled a controller-model visual found under the XR rig: " + renderer.gameObject.name);
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Real XR Interaction Toolkit hand grab for the joysticks - per request
+        // ("XR Interaction Toolkit의 실제 Hand Interactor/Direct Interactor를
+        // 사용... 현재 프로젝트의 XR Hands 구조와 충돌하지 않는다면"). Investigated
+        // first (per that request's own instructions) by inspecting the actual
+        // imported "XR Origin Hands (XR Rig)" prefab
+        // (Assets/Samples/XR Interaction Toolkit/3.3.2/Hands Interaction Demo/
+        // Prefabs/XR Origin Hands (XR Rig).prefab) directly: it already contains
+        // a "Left Hand" and a "Right Hand" GameObject, each with its own real,
+        // officially-supported "Near-Far Interactor" child - reading actual
+        // pinch/grip selection straight from Galaxy XR's hand tracking through
+        // XRI's own tested logic (the SAME hand-tracking data source
+        // HandJointTracker already reads, just via a different, more "official"
+        // path). This does NOT conflict with this project's existing XR Hands
+        // structure - it doesn't touch hand tracking, the Hand Visualizer, or any
+        // OpenXR/XR Hands setting; it only ADDS a plain, non-physical
+        // XRSimpleInteractable onto each joystick's handle (see
+        // AttachHandInteractable) so those already-existing interactors have
+        // something to select, and reports that selection into JoystickLever
+        // (which still owns 100% of the actual tilt/twist/return math either way).
+        // ---------------------------------------------------------------
+        static void WireJoystickHandInteractors(GameObject xrOrigin, JoystickLever leftStick, JoystickLever rightStick)
+        {
+            Transform leftHandRoot = FindDeepChild(xrOrigin.transform, "Left Hand");
+            Transform rightHandRoot = FindDeepChild(xrOrigin.transform, "Right Hand");
+
+            Transform leftInteractor = leftHandRoot != null ? FindDeepChild(leftHandRoot, "Near-Far Interactor") : null;
+            Transform rightInteractor = rightHandRoot != null ? FindDeepChild(rightHandRoot, "Near-Far Interactor") : null;
+
+            if (leftHandRoot == null || rightHandRoot == null || leftInteractor == null || rightInteractor == null)
+            {
+                Debug.LogWarning("[Gundam] Could not find this rig's own 'Left Hand'/'Right Hand' > 'Near-Far Interactor' " +
+                    "hierarchy (from the imported 'Hands Interaction Demo' sample) - the real XR Interaction Toolkit grab " +
+                    "path won't be wired up this run. The existing proximity+grip/pinch fallback in JoystickLever will " +
+                    "still work on its own. Make sure the 'Hands Interaction Demo' sample is imported and this rig's " +
+                    "prefab still has that hierarchy, then re-run Build Cockpit Scene.");
+                return;
+            }
+
+            AttachHandInteractable(leftStick, leftInteractor);
+            AttachHandInteractable(rightStick, rightInteractor);
+
+            Debug.Log("[Gundam] Wired LeftJoystick/RightJoystick to this rig's own real Near-Far Interactors " +
+                "(left hand only grabs LeftJoystick, right hand only RightJoystick).");
+        }
+
+        /// <summary>Adds a plain XRSimpleInteractable (no automatic movement - JoystickLever
+        /// keeps full control of the actual tilt/twist/return math) plus a
+        /// HandExclusiveGrabAdapter onto the given stick's handle, restricted to only ever
+        /// being selected by 'allowedInteractor'. Colliders are wired explicitly (rather
+        /// than relying on XRSimpleInteractable's own auto-populate-from-children timing)
+        /// to the same GripBall/finger-button spheres CreateJoystick already parents under
+        /// the handle - no separate grab collider needed.</summary>
+        static void AttachHandInteractable(JoystickLever lever, Transform allowedInteractor)
+        {
+            if (lever == null || lever.handle == null) return;
+
+            XRSimpleInteractable interactable = lever.handle.gameObject.AddComponent<XRSimpleInteractable>();
+
+            Collider[] colliders = lever.handle.GetComponentsInChildren<Collider>(true);
+            if (colliders.Length > 0)
+            {
+                SerializedObject so = new SerializedObject(interactable);
+                SerializedProperty collidersProp = so.FindProperty("m_Colliders");
+                if (collidersProp != null)
+                {
+                    collidersProp.ClearArray();
+                    for (int i = 0; i < colliders.Length; i++)
+                    {
+                        collidersProp.InsertArrayElementAtIndex(i);
+                        collidersProp.GetArrayElementAtIndex(i).objectReferenceValue = colliders[i];
+                    }
+                    so.ApplyModifiedProperties();
+                }
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] " + lever.gameObject.name + "'s handle has no Colliders under it for the " +
+                    "real XR Interaction Toolkit interactable to use - it won't be selectable that way (the proximity+" +
+                    "grip/pinch fallback in JoystickLever is unaffected).");
+            }
+
+            HandExclusiveGrabAdapter adapter = lever.handle.gameObject.AddComponent<HandExclusiveGrabAdapter>();
+            adapter.joystick = lever;
+            adapter.onlyAllowedInteractor = allowedInteractor;
+        }
+
+        // ---------------------------------------------------------------
+        // Control yoke — horizontal side-mounted grip handle reaching in
+        // hovering free in space at the seat's armrest - no mechanical
+        // housing/rod/collar/console anchoring it anymore. Per request
+        // ("조이스틱으로 조종하는게 아니고 손으로 하는거니까 조이스틱 빼고 손으로
+        // 잡을수있게해줘"): this was never actually a joystick input-wise -
+        // JoystickLever always read a tracked HAND (proximity + pinch, see
+        // JoystickLever.cs), never a physical stick/gamepad axis - but it
+        // LOOKED like a mechanical joystick (console housing + connecting
+        // arm + ratchet collar + indicator light), which read as "조종간"
+        // rather than something you just reach out and grab. That static
+        // decoration is removed here; the grab ball + finger buttons (the
+        // only part the hand ever actually touches) stay exactly where they
+        // were, at the same armrest position, so the pilot still reaches to
+        // the same spot and grabs/tilts/twists it exactly as before -
+        // JoystickLever's grab-and-tilt math (pivotGo/handleGo) is completely
+        // untouched by this visual change.
+        // ---------------------------------------------------------------
+        static JoystickLever CreateJoystick(string name, Transform parent, Vector3 localPos, bool isRight,
+            Material accentMat, Material buttonMat,
+            HandJointTracker left, HandJointTracker right)
+        {
+            GameObject baseGo = new GameObject(name + "_Mount");
+            baseGo.transform.SetParent(parent, false);
+            baseGo.transform.localPosition = localPos;
+
+            // --- Grip (this is what the hand actually grabs and tilts) ---
+            GameObject pivotGo = new GameObject(name + "_Pivot");
+            pivotGo.transform.SetParent(baseGo.transform, false);
+            pivotGo.transform.localPosition = new Vector3(0f, 0.02f, 0.05f);
+
+            GameObject handleGo = new GameObject(name + "_Handle");
+            handleGo.transform.SetParent(pivotGo.transform, false);
+            handleGo.transform.localPosition = Vector3.zero;
+
+            // The visible grip ball and its buttons are all CHILDREN of
+            // handleGo - JoystickLever overwrites handleGo's own
+            // localRotation every frame for tilt, and children ride along
+            // with that rigidly, so the whole grip tilts as one piece.
+            //
+            // Grip changed from a horizontal capsule bar to a sphere sized
+            // to be wrapped by a whole fist (per request: "구형으로 만들어서
+            // 손으로 움켜쥐고 사진과 같이 잡고", matching the attached reference
+            // photos of a clenched fist around a round grip ball).
+            CreateSphere(name + "_GripBall", handleGo.transform, Vector3.zero,
+                new Vector3(0.10f, 0.10f, 0.10f), accentMat);
+
+            CreateSphere(name + "_ThumbButton", handleGo.transform, new Vector3(0f, 0.045f, -0.015f),
+                new Vector3(0.022f, 0.022f, 0.022f), buttonMat);
+
+            // Per-finger buttons curling across the front face of the grip
+            // ball, one under where each of the four fingers naturally
+            // rests when wrapped around it (per request: "손가락별로
+            // 버튼이있어서 사용할거야"). Visual/physical placeholders only -
+            // not wired to any action yet, same as ThumbButton/Trigger.
+            CreateSphere(name + "_IndexButton", handleGo.transform, new Vector3(-0.026f, 0.030f, 0.040f),
+                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            CreateSphere(name + "_MiddleButton", handleGo.transform, new Vector3(-0.009f, 0.014f, 0.049f),
+                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            CreateSphere(name + "_RingButton", handleGo.transform, new Vector3(0.009f, -0.004f, 0.050f),
+                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            CreateSphere(name + "_PinkyButton", handleGo.transform, new Vector3(0.026f, -0.022f, 0.044f),
+                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+
+            if (isRight)
+            {
+                CreateCube(name + "_Trigger", handleGo.transform, new Vector3(0f, -0.035f, 0.045f),
+                    new Vector3(0.03f, 0.018f, 0.035f), accentMat);
+            }
+
+            // GripPoint - per report ("손과 조종간 손잡이가 정확히 붙어야 한다"):
+            // a separate child marking the exact point JoystickLever aligns to
+            // the hand's palm/grip on grab (see JoystickLever.cs's Update),
+            // rather than the whole Stick Transform being copied onto the hand.
+            // Placed at the GripBall's own center (handleGo's local origin,
+            // same spot _GripBall above is created at) since that's where a
+            // wrapped fist naturally centers on this ball-shaped grip.
+            GameObject gripPointGo = new GameObject(name + "_GripPoint");
+            gripPointGo.transform.SetParent(handleGo.transform, false);
+            gripPointGo.transform.localPosition = Vector3.zero;
+
+            JoystickLever lever = baseGo.AddComponent<JoystickLever>();
+            lever.pivot = pivotGo.transform;
+            lever.handle = handleGo.transform;
+            lever.gripPoint = gripPointGo.transform;
+            lever.leftHandTracker = left;
+            lever.rightHandTracker = right;
+            return lever;
+        }
+
+        static GameObject CreateXROrigin(Transform parent, Vector3 localPos)
+        {
+            GameObject prefab = null;
+            try
+            {
+                prefab = TryImportSampleAndFindXROriginPrefab();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Gundam] XR Origin sample import failed, will create a minimal placeholder instead: " + e);
+            }
+
+            GameObject instance;
+            if (prefab != null)
+            {
+                instance = (GameObject)PrefabUtility.InstantiatePrefab(prefab);
+                instance.name = "XR Origin (Gundam Cockpit)";
+                Debug.Log("[Gundam] Instantiated XR rig from imported sample: " + AssetDatabase.GetAssetPath(prefab));
+            }
+            else
+            {
+                instance = new GameObject("XR_ORIGIN_PLACEHOLDER_REPLACE_ME");
+                GameObject camGo = new GameObject("Main Camera");
+                camGo.transform.SetParent(instance.transform, false);
+                camGo.tag = "MainCamera";
+                Camera cam = camGo.AddComponent<Camera>();
+                cam.nearClipPlane = 0.05f;
+                Debug.LogWarning("[Gundam] Could not auto-import the XR Interaction Toolkit 'Hands Interaction Demo' sample. " +
+                    "Open Package Manager > XR Interaction Toolkit > Samples, import 'Hands Interaction Demo', " +
+                    "then drag the 'XR Origin Hands (XR Rig)' prefab into the scene, place it where " +
+                    "'XR_ORIGIN_PLACEHOLDER_REPLACE_ME' is (under MobileSuitRoot), move the " +
+                    "LeftHandTracker/RightHandTracker children onto it, and delete the placeholder.");
+            }
+
+            instance.transform.SetParent(parent, false);
+            instance.transform.localPosition = localPos;
+
+            // Widen the view camera's field of view - Unity's default (60
+            // degrees) reads noticeably narrower/more "zoomed in" than
+            // natural human vision, which made the cockpit feel more
+            // enclosed than intended ("내 시점이 더 넓어야 할 것 같아").
+            // On a real OpenXR headset the true per-eye FOV ultimately
+            // comes from the hardware lenses/runtime and this value isn't
+            // guaranteed to change that, but it fixes the Editor/simulator
+            // preview and any runtime path that does honor
+            // Camera.fieldOfView, and is harmless either way. Searches the
+            // whole instantiated hierarchy so it works whichever XR rig
+            // prefab was actually found (or the placeholder fallback).
+            Camera viewCamera = instance.GetComponentInChildren<Camera>(true);
+            if (viewCamera != null)
+            {
+                viewCamera.fieldOfView = 100f;
+                viewCamera.nearClipPlane = Mathf.Min(viewCamera.nearClipPlane, 0.05f);
+
+                // Background: if PlaceExternalGundam successfully wired up the
+                // 360 head-cam skybox (RenderSettings.skybox), use THAT - per
+                // request ("콕핏에 검정부분에서 건담에 머리부분에서 보이는거
+                // 처럼 해야해 360도로") the pilot should see what the Gundam's
+                // head sees in every direction. This mostly matters just
+                // outside Cockpit_Dome's own coverage now (the dome itself is
+                // solid/opaque again and shows the same live feed directly -
+                // see BuildCockpitEnclosure), e.g. if the real headset height
+                // ever puts the camera right at the dome's edge. Otherwise
+                // (FBX/Head bone not found yet) fall back to the original
+                // plain deep-space Solid Color.
+                if (RenderSettings.skybox != null)
+                {
+                    viewCamera.clearFlags = CameraClearFlags.Skybox;
+                }
+                else
+                {
+                    viewCamera.clearFlags = CameraClearFlags.SolidColor;
+                    viewCamera.backgroundColor = new Color(0.01f, 0.01f, 0.025f, 1f);
+                }
+
+                // Don't let the pilot directly see ExternalGundam's own body
+                // through the dome - per request ("건담이 콕핏 안에서 보이면
+                // 안돼 왜냐면 내가 저 안에 타고 있는 설정이니까"): the pilot
+                // IS this Gundam, so its exterior must not float in the
+                // player's own first-person view. Its body is on
+                // GundamBodyLayer (see PlaceExternalGundam) - exclude just
+                // that one layer, everything else the player's camera
+                // already sees (Starfield/Targets/OrbitHUD/cockpit) is
+                // untouched. The head-cam (also in PlaceExternalGundam) keeps
+                // its default "see everything" mask, so that's how the
+                // Gundam's own viewpoint still reaches the cockpit screen.
+                viewCamera.cullingMask &= ~(1 << GundamBodyLayer);
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Could not find a Camera under the instantiated XR rig to widen its field of view.");
+            }
+
+            // Force the rig to ignore the player's REAL room floor height.
+            // The Starter Assets/Hands sample rig ships with
+            // RequestedTrackingOriginMode = "Not Specified", which most
+            // OpenXR runtimes (including on-device Android XR) resolve to
+            // real Floor tracking - meaning the runtime camera Y becomes
+            // the player's actual head height above their actual real
+            // floor (roughly 1.6-2.0m). That can place the camera outside
+            // the cockpit dome entirely depending on the player's real
+            // height/room, which reads as a solid black screen that never
+            // changes no matter which way the player looks (the classic
+            // symptom reported: "검정화면만 나와... 360도가 다 바뀌어야해" - the
+            // camera isn't inside the 360 dome at all, so there's nothing
+            // for it to see in any direction). This is a fixed seated
+            // cockpit, not a room-scale experience, so the real room floor
+            // must never affect the camera's height - "Device" mode uses
+            // only the headset's own relative pose and ignores real floor
+            // height, guaranteeing the camera stays exactly where this
+            // script places it (inside the dome) regardless of the
+            // player's real-world height or floor.
+            XROrigin xrOriginComponent = instance.GetComponentInChildren<XROrigin>(true);
+            if (xrOriginComponent != null)
+            {
+                xrOriginComponent.RequestedTrackingOriginMode = XROrigin.TrackingOriginMode.Device;
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Could not find an XROrigin component under the instantiated XR rig to force Device tracking mode.");
+            }
+
+            return instance;
+        }
+
+        static GameObject TryImportSampleAndFindXROriginPrefab()
+        {
+            UnityEditor.PackageManager.PackageInfo info =
+                UnityEditor.PackageManager.PackageInfo.FindForPackageName("com.unity.xr.interaction.toolkit");
+            if (info == null)
+            {
+                Debug.LogWarning("[Gundam] com.unity.xr.interaction.toolkit is not resolved yet. " +
+                    "Open Window > Package Manager once to let packages finish installing, then re-run this menu item.");
+                return null;
+            }
+
+            var samples = UnityEditor.PackageManager.UI.Sample.FindByPackage(info.name, info.version);
+            bool importedAny = false;
+            foreach (var sample in samples)
+            {
+                // Import exactly the two samples XR Interaction Toolkit's own
+                // package.json declares as needed for hand tracking:
+                //   - "Hands Interaction Demo"  (has the XR Origin Hands rig)
+                //   - "Starter Assets"          (a documented dependency of the
+                //                                 sample above — input actions/
+                //                                 presets it relies on)
+                // "AR Starter Assets" is deliberately excluded: it also depends
+                // on "Starter Assets", but additionally pulls in
+                // com.unity.xr.arfoundation, which this project does not want
+                // (see README) and which was the source of the
+                // "XRSimulation-Session" duplicate-ID warning. Matching must be
+                // an exact name check, not a substring/Contains check — e.g.
+                // "AR Starter Assets" also contains the substring
+                // "Starter Assets", so a Contains("Starter Assets") test would
+                // wrongly match it too.
+                bool isNeededSample =
+                    sample.displayName.Equals("Hands Interaction Demo", StringComparison.OrdinalIgnoreCase) ||
+                    sample.displayName.Equals("Starter Assets", StringComparison.OrdinalIgnoreCase);
+
+                if (!isNeededSample) continue;
+
+                if (sample.isImported)
+                {
+                    importedAny = true;
+                    continue;
+                }
+
+                sample.Import();
+                importedAny = true;
+            }
+
+            AssetDatabase.Refresh();
+            if (!importedAny) return null;
+
+            string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { "Assets/Samples" });
+            string best = null;
+            foreach (string guid in guids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                if (path.IndexOf("XR Origin", StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                if (best == null || path.IndexOf("Hand", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    best = path;
+                }
+            }
+
+            return best == null ? null : AssetDatabase.LoadAssetAtPath<GameObject>(best);
+        }
+
+        // Always makes this scene BUILD INDEX 0 - not just "present somewhere
+        // in the list". The old version only appended if missing, which on a
+        // fresh project left Assets/Scenes/SampleScene.unity (added to Build
+        // Settings by the default template) at index 0 and GundamCockpit at
+        // index 1 - so a build launched straight into the empty default
+        // scene (a bare Camera + Light, no XR session, no cockpit at all),
+        // which on-device reads as "그냥 유니티 공간만 보임" (nothing but
+        // Unity's default background - no error, no cockpit, nothing).
+        // Removing any existing entry for this path first and re-inserting
+        // at position 0 guarantees this scene is what actually launches,
+        // regardless of what else Build Settings already contains.
+        static void AddSceneToBuildSettings(string path)
+        {
+            var scenes = EditorBuildSettings.scenes.ToList();
+            scenes.RemoveAll(s => s.path == path);
+            scenes.Insert(0, new EditorBuildSettingsScene(path, true));
+            EditorBuildSettings.scenes = scenes.ToArray();
+        }
+
+        static Material MakeMat(Color c)
+        {
+            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+            Material m = new Material(shader != null ? shader : Shader.Find("Standard"));
+            m.color = c;
+            return m;
+        }
+
+        static Material MakeEmissiveMat(Color baseColor, Color emission)
+        {
+            Material m = MakeMat(baseColor);
+            m.EnableKeyword("_EMISSION");
+            m.SetColor("_EmissionColor", emission);
+            m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+            return m;
+        }
+
+        static GameObject CreatePrimitiveGo(PrimitiveType type, string name, Transform parent, Vector3 localPos, Vector3 scale, Material mat)
+        {
+            GameObject go = GameObject.CreatePrimitive(type);
+            go.name = name;
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = localPos;
+            go.transform.localScale = scale;
+            Renderer rend = go.GetComponent<Renderer>();
+            if (rend != null) rend.sharedMaterial = mat;
+            return go;
+        }
+
+        static GameObject CreateCube(string n, Transform p, Vector3 pos, Vector3 scale, Material m) =>
+            CreatePrimitiveGo(PrimitiveType.Cube, n, p, pos, scale, m);
+
+        static GameObject CreateCylinder(string n, Transform p, Vector3 pos, Vector3 scale, Material m) =>
+            CreatePrimitiveGo(PrimitiveType.Cylinder, n, p, pos, scale, m);
+
+        static GameObject CreateCapsule(string n, Transform p, Vector3 pos, Vector3 scale, Material m) =>
+            CreatePrimitiveGo(PrimitiveType.Capsule, n, p, pos, scale, m);
+
+        static GameObject CreateSphere(string n, Transform p, Vector3 pos, Vector3 scale, Material m) =>
+            CreatePrimitiveGo(PrimitiveType.Sphere, n, p, pos, scale, m);
+
+        /// <summary>Thin box stretched/rotated to connect two points — used for frame beams.</summary>
+        static GameObject CreateBeam(string name, Transform parent, Vector3 a, Vector3 b, float thickness, Material mat)
+        {
+            Vector3 mid = (a + b) * 0.5f;
+            Vector3 dir = b - a;
+            float len = dir.magnitude;
+            GameObject go = CreateCube(name, parent, mid, new Vector3(thickness, thickness, Mathf.Max(len, 0.001f)), mat);
+            if (len > 0.0001f) go.transform.localRotation = Quaternion.LookRotation(dir.normalized);
+            return go;
+        }
+    }
+}

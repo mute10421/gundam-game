@@ -30,13 +30,15 @@ namespace Gundam.Cockpit
     /// Now everything is measured RELATIVE TO THE HAND ITSELF, from the same joint
     /// sample, so moving the stick or the whole hand no longer matters:
     ///   a) push: the pad moving closer to the palm center than it rested
-    ///      (pressDepth, default 10 mm), and
+    ///      (1 point per pressDepth), and
     ///   b) curl: the finger's own joints folding more than they rested
-    ///      (pressCurlDegrees, default 18 deg) - pressing a button on a ball you're
-    ///      gripping is mostly a fingertip flex, which this catches even when the
-    ///      pad barely moves.
-    /// Either one presses (OR); release needs both back under half (hysteresis).
-    /// Both signals are low-pass filtered (smoothingSeconds). Each finger gets its
+    ///      (1 point per pressCurlDegrees) - pressing a button on a ball you're
+    ///      gripping is mostly a fingertip flex.
+    /// The points are added; the button presses once the total reaches pressScore
+    /// and has stayed there for pressHoldSeconds, and never while either signal
+    /// shows the finger straightening (see the "엄지를 펴도 발칸이 나갈때가 있어"
+    /// tuning note on the fields). Releases below releaseScore. Both signals are
+    /// low-pass filtered, with one-sample tracking jumps ignored. Each finger gets its
     /// resting reference on its own first tracked frame after the grab settles. The
     /// rest slowly re-adapts only while the finger is clearly released, so a held
     /// half-press can't creep into "rest".
@@ -82,13 +84,38 @@ namespace Gundam.Cockpit
         [Tooltip("Seconds after grabbing before resting references are taken (lets the fist finish closing).")]
         public float settleTime = 0.3f;
 
+        // TUNED per report ("엄지를 펴도 발칸이 나갈때가 있어 약간 감도 수정이
+        // 필요함" - false presses with the thumb straightened). Previously EITHER
+        // signal alone (10 mm OR 18 deg) pressed, so one noisy joint - common for a
+        // thumb half-hidden inside a fist - fired the vulcan by itself. Now:
+        //   - both signals are combined into one score (push/pressDepth +
+        //     curl/pressCurlDegrees) that must reach pressScore, and NEITHER may be
+        //     pointing the "extended" way (a straightening or backing-off finger can
+        //     never press, however noisy the other signal is);
+        //   - the condition must hold for pressHoldSeconds before it counts;
+        //   - single-sample tracking jumps (glitchDistance / glitchDegrees) are
+        //     ignored instead of being fed into the filter;
+        //   - defaults are a little stiffer (12 mm / 22 deg), and 'sensitivity'
+        //     scales everything at once for quick tuning.
         [Header("Press detection (hand-relative)")]
-        [Tooltip("Pad moving this much (m) closer to the palm than it rested presses the button.")]
-        public float pressDepth = 0.010f;
-        [Tooltip("The finger's joints folding this many degrees more than they rested presses the button.")]
-        public float pressCurlDegrees = 18f;
+        [Tooltip("Overall sensitivity. 1 = default, lower = needs a firmer press (fewer accidental presses), higher = lighter press.")]
+        [Range(0.3f, 2f)] public float sensitivity = 1f;
+        [Tooltip("Reference push (m): pad moving this much closer to the palm than it rested counts as 1 point.")]
+        public float pressDepth = 0.012f;
+        [Tooltip("Reference fold (deg): the finger's joints folding this much more than they rested counts as 1 point.")]
+        public float pressCurlDegrees = 22f;
+        [Tooltip("Points needed to press (push points + fold points). 1.6 = e.g. a full fold plus a bit of push, or a clear push plus a bit of fold.")]
+        public float pressScore = 1.6f;
+        [Tooltip("Points below which a pressed button releases.")]
+        public float releaseScore = 0.6f;
+        [Tooltip("The press condition must hold this long (s) before it counts - filters out momentary tracking spikes.")]
+        public float pressHoldSeconds = 0.06f;
+        [Tooltip("A single sample jumping more than this (m) from the filtered pad distance is treated as a tracking glitch and ignored.")]
+        public float glitchDistance = 0.03f;
+        [Tooltip("A single sample jumping more than this (deg) from the filtered fold is treated as a tracking glitch and ignored.")]
+        public float glitchDegrees = 40f;
         [Tooltip("Low-pass filter time (s) on the tracked values - removes joint jitter.")]
-        public float smoothingSeconds = 0.04f;
+        public float smoothingSeconds = 0.05f;
         [Tooltip("Seconds for the resting reference to re-adapt while the finger is clearly released (bigger = steadier).")]
         public float restAdaptSeconds = 2f;
 
@@ -108,6 +135,8 @@ namespace Gundam.Cockpit
         public float PressAmount(Finger f) => Mathf.Max(0f, _pushNow[(int)f]);
         /// <summary>How many degrees the finger is currently folded past its rest (0 if not). For HUD/tuning.</summary>
         public float CurlAmount(Finger f) => Mathf.Max(0f, _curlPushNow[(int)f]);
+        /// <summary>Current press score (push points + fold points); presses at pressScore. For HUD/tuning.</summary>
+        public float PressScore(Finger f) => _scoreNow[(int)f];
         /// <summary>True once this grab has settled and at least one finger has a resting reference.</summary>
         public bool ButtonsFitted => _anyFitted;
 
@@ -138,6 +167,9 @@ namespace Gundam.Cockpit
         readonly float[] _pushNow = new float[5];
         readonly float[] _curlPushNow = new float[5];
         readonly bool[] _pressed = new bool[5];
+        readonly float[] _downTime = new float[5];
+        readonly int[] _glitchFrames = new int[5];
+        readonly float[] _scoreNow = new float[5];
 
         Renderer[] _renderers;
         Material[] _normalMaterials;
@@ -256,6 +288,18 @@ namespace Gundam.Cockpit
                 }
                 else
                 {
+                    // Glitch rejection: a one-sample leap (typical when a joint
+                    // hidden inside the fist gets re-estimated) is skipped, not
+                    // filtered in - but a sustained change still gets through,
+                    // since the filtered value keeps advancing toward real motion.
+                    bool distGlitch = Mathf.Abs(_rawPalmDist[i] - _palmDist[i]) > glitchDistance;
+                    bool curlGlitch = _curlValid[i] && Mathf.Abs(_rawCurl[i] - _curl[i]) > glitchDegrees;
+                    if (distGlitch || curlGlitch)
+                    {
+                        _glitchFrames[i]++;
+                        if (_glitchFrames[i] < 3) continue; // hold state through short spikes
+                    }
+                    _glitchFrames[i] = 0;
                     _palmDist[i] = Mathf.Lerp(_palmDist[i], _rawPalmDist[i], k);
                     if (_curlValid[i]) _curl[i] = Mathf.Lerp(_curl[i], _rawCurl[i], k);
                 }
@@ -282,15 +326,32 @@ namespace Gundam.Cockpit
                 _pushNow[i] = push;
                 _curlPushNow[i] = curlPush;
 
-                bool down = push >= pressDepth || curlPush >= pressCurlDegrees;
-                bool up = push < pressDepth * 0.5f && curlPush < pressCurlDegrees * 0.5f;
+                float s = Mathf.Max(0.05f, sensitivity);
+                float pushPts = push / Mathf.Max(1e-4f, pressDepth / s);
+                float curlPts = curlPush / Mathf.Max(0.1f, pressCurlDegrees / s);
+                float score = Mathf.Max(0f, pushPts) + Mathf.Max(0f, curlPts);
+                _scoreNow[i] = score;
 
-                if (!_pressed[i] && down) SetPressed(i, true);
-                else if (_pressed[i] && up) SetPressed(i, false);
+                // Extension veto: if either signal says the finger is straightening
+                // or backing away from the palm (beyond a small noise margin), it
+                // can't be pressing - "엄지를 펴도 발칸이 나갈때가 있어".
+                bool extending = pushPts < -0.35f || curlPts < -0.35f;
+                bool downNow = !extending && score >= pressScore;
+
+                if (!_pressed[i])
+                {
+                    _downTime[i] = downNow ? _downTime[i] + Time.deltaTime : 0f;
+                    if (_downTime[i] >= pressHoldSeconds) SetPressed(i, true);
+                }
+                else if (extending || score < releaseScore)
+                {
+                    SetPressed(i, false);
+                    _downTime[i] = 0f;
+                }
 
                 // Re-adapt the rest only while clearly released, so a slowly held
                 // half-press never becomes the new "rest".
-                if (!_pressed[i] && push < pressDepth * 0.3f && curlPush < pressCurlDegrees * 0.3f)
+                if (!_pressed[i] && score < releaseScore * 0.5f)
                 {
                     _restPalmDist[i] = Mathf.Lerp(_restPalmDist[i], _palmDist[i], adapt);
                     _restCurl[i] = Mathf.Lerp(_restCurl[i], _curl[i], adapt);
@@ -340,6 +401,9 @@ namespace Gundam.Cockpit
                 if (_pressed[i]) SetPressed(i, false);
                 _pushNow[i] = 0f;
                 _curlPushNow[i] = 0f;
+                _scoreNow[i] = 0f;
+                _downTime[i] = 0f;
+                _glitchFrames[i] = 0;
             }
         }
     }

@@ -88,7 +88,31 @@ namespace Gundam.Cockpit
                     HeadVulcanController.FireReadyState.Reloading => "RELOADING",
                     _ => "READY",
                 };
-                vulcanAmmoText.text = $"{headVulcan.weaponName}  AMMO {headVulcan.CurrentAmmo:00}/{headVulcan.maxAmmo:00}  [{stateLabel}]";
+                // Thumb readout (per "총알이 안나가는거 같아"): shows whether the
+                // right thumb is tracked at all and its bend vs. the fire
+                // threshold, plus a brief FIRE! flash on each shot - so it's
+                // visible on the headset whether a shot actually triggered.
+                string thumb;
+                JoystickFingerButtons btn = headVulcan.fireButtons;
+                if (btn != null)
+                {
+                    // Thumb-BUTTON trigger (per "엄지 부분에 버튼이 눌렸을때 발칸이
+                    // 나가게하자"): shows whether the right stick is held and its
+                    // buttons fitted, and how far the thumb is pushed in (mm) vs.
+                    // the press depth.
+                    if (btn.lever == null || !btn.lever.isGrabbed) thumb = "THUMB BTN: GRAB R-STICK";
+                    else if (!btn.ButtonsFitted) thumb = "THUMB BTN: FITTING...";
+                    else thumb = $"THUMB BTN {(btn.ThumbPressed ? "ON" : "--")}  " +
+                        $"{Mathf.RoundToInt(btn.PressAmount(JoystickFingerButtons.Finger.Thumb) * 1000f)}/{Mathf.RoundToInt(btn.pressDepth * 1000f)}mm";
+                }
+                else
+                {
+                    thumb = headVulcan.IsThumbTracked
+                        ? $"THUMB {Mathf.RoundToInt(headVulcan.ThumbBend * 100f)}%/{Mathf.RoundToInt(headVulcan.thumbBendThreshold * 100f)}%"
+                        : "THUMB --";
+                }
+                string fired = Time.time - headVulcan.LastFireTime < 0.2f ? "  FIRE!" : "";
+                vulcanAmmoText.text = $"{headVulcan.weaponName}  AMMO {headVulcan.CurrentAmmo:00}/{headVulcan.maxAmmo:00}  [{stateLabel}]\n{thumb}{fired}";
                 vulcanAmmoText.color = GundamVitals.StatusColor(headVulcan.AmmoFraction);
             }
         }

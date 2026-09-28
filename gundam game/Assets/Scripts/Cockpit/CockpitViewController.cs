@@ -70,6 +70,11 @@ namespace Gundam.Cockpit
         public float Yaw { get; private set; }
         /// <summary>Current accumulated pitch, degrees (+ = looking up).</summary>
         public float Pitch { get; private set; }
+        /// <summary>The current view rotation (the same one sent to the dome's
+        /// _ViewRotQ): looking at dome direction d shows world direction
+        /// LookRotation * d. Read by HeadVulcanController to aim where the
+        /// pilot actually sees.</summary>
+        public Quaternion LookRotation { get; private set; } = Quaternion.identity;
 
         static readonly int ViewRotQId = Shader.PropertyToID("_ViewRotQ");
 
@@ -125,6 +130,7 @@ namespace Gundam.Cockpit
             // Euler order = yaw around world up, then pitch around the turned
             // right axis - so the view never rolls.
             Quaternion look = Quaternion.Euler(-Pitch, Yaw, 0f);
+            LookRotation = look;
 
             // 1) The external-view Camera itself (HeadCam) - its LOCAL rotation
             //    only, composed on top of its original rest rotation.

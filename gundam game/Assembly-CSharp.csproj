@@ -56,6 +56,7 @@
     <Compile Include="Assets\Scripts\Cockpit\JoystickLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\GundamHeadCam360.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandTrackingStatusLogger.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\JoystickFingerButtons.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponAimFireController.cs" />
     <Compile Include="Assets\TutorialInfo\Readme.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ExternalGundamFollower.cs" />

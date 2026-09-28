@@ -63,6 +63,9 @@ namespace Gundam.Cockpit
     {
         public JoystickLever leftStick;
 
+        [Tooltip("RightJoystick's view controller. Its Yaw (how far the cockpit's external view has been turned) sets which way 'forward' on the LEFT stick moves the suit. Leave null to always move along this transform's fixed forward.")]
+        public CockpitViewController viewController;
+
         public float maxMoveSpeed = 8f;
         public float maxTurnSpeed = 60f; // degrees/sec
 
@@ -115,12 +118,27 @@ namespace Gundam.Cockpit
             // sideways = screen sideways, always, no matter how long it's
             // been steered. The stick's left/right no longer turns anything.
             // (Looking around is the RightJoystick's job now - see
-            // HeadCamManualLook - completely separate from this.) HeadingYaw
-            // is kept as a property so CockpitHUD's HEADING readout still
-            // compiles; it simply stays at 0 now. maxTurnSpeed is kept too
-            // (unused) so no serialized field disappears from the Inspector.
-            Vector3 suitForward = transform.forward;
-            Vector3 suitRight = transform.right;
+            // CockpitViewController - completely separate from this.)
+            // maxTurnSpeed is kept (unused) so no serialized field disappears
+            // from the Inspector.
+            //
+            // UPDATE per report ("움직이는거를 콕핏에서의 시선을 기준으로
+            // 해야할거 같아 옆을 바라볼때는 앞으로 밀어도 옆으로 가는거 처럼
+            // 되니까"): once the RightJoystick turns the cockpit's external
+            // view (CockpitViewController), the cockpit's front no longer shows
+            // this transform's fixed forward - it shows the world rotated by
+            // the view's Yaw. So forward/strafe are now rotated by that same
+            // Yaw (yaw ONLY - the view's pitch is ignored, so looking up/down
+            // never makes the suit climb or dive): stick forward = whatever
+            // the cockpit is currently looking at. The LEFT stick still never
+            // turns anything itself, and this still never writes
+            // transform.rotation. HeadingYaw now mirrors that view yaw so the
+            // HUD's HEADING readout shows the real direction of travel.
+            float viewYaw = viewController != null ? viewController.Yaw : 0f;
+            HeadingYaw = viewYaw;
+            Quaternion viewHeading = Quaternion.AngleAxis(viewYaw, Vector3.up);
+            Vector3 suitForward = viewHeading * transform.forward;
+            Vector3 suitRight = viewHeading * transform.right;
 
             // Diagonal input is clamped to length 1 first so pushing the stick
             // to a corner doesn't move faster than pushing it straight in one

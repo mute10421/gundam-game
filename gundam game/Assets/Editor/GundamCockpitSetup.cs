@@ -351,6 +351,11 @@ namespace Gundam.EditorTools
                 viewController.rightJoystick = rightStick;
                 viewController.viewCamera = gundamResult.headCam360.headCam;
 
+                // Per report ("움직이는거를 콕핏에서의 시선을 기준으로 해야할거
+                // 같아"): the left stick's movement now follows the view's
+                // yaw - see ShipMovementController.Update().
+                ship.viewController = viewController;
+
                 Transform domeTransform = interior.transform.Find("Cockpit_Dome");
                 viewController.domeRenderer = domeTransform != null ? domeTransform.GetComponent<Renderer>() : null;
 
@@ -426,6 +431,21 @@ namespace Gundam.EditorTools
                     // FrontDisplay (hud.vulcanAmmoText was already wired
                     // earlier, but headVulcan itself doesn't exist until now).
                     hud.headVulcan = headVulcan;
+
+                    // Per report ("총알을 발사하면 내가 볼수있어야함"): aim at
+                    // what the pilot actually sees on the RightJoystick-turnable
+                    // Cockpit_Dome view, with both muzzles converging on it -
+                    // see HeadVulcanController.Fire(). CockpitViewController
+                    // was created earlier (its own GameObject under suitRoot).
+                    headVulcan.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+
+                    // Per request ("엄지 부분에 버튼이 눌렸을때 발칸이 나가게하자"):
+                    // the RightJoystick's thumb button is the fire trigger now.
+                    headVulcan.fireButtons = rightStick.GetComponent<JoystickFingerButtons>();
+                    if (headVulcan.viewController == null)
+                    {
+                        Debug.LogWarning("[Gundam] Head Vulcan: no CockpitViewController found - shots fall back to plain mainCamera.forward (won't follow the RightJoystick view).");
+                    }
 
                     // Reuses the SAME XRHandTrackingEvents component already
                     // sitting on RightHandTracker (created in CreateHandTracker
@@ -1359,7 +1379,9 @@ namespace Gundam.EditorTools
             // away while aiming with the head. Placed just under StatusReadout
             // (y=-40) and well clear of the tick ring (BuildTickRing above,
             // radius 230 centered at y=10, so its bottom edge is ~y=-220).
-            vulcanAmmoText = CreateUIText("VulcanAmmoReadout", centerCanvas.transform, new Vector2(0, -80), new Vector2(600, 28), 16, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "HEAD VULCAN AMMO 60/60 [READY]");
+            // Two lines now (ammo/state + right-thumb bend readout, see
+            // CockpitHUD) - taller box, centered a bit lower to match.
+            vulcanAmmoText = CreateUIText("VulcanAmmoReadout", centerCanvas.transform, new Vector2(0, -92), new Vector2(600, 52), 16, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "HEAD VULCAN AMMO 60/60 [READY]\nTHUMB --");
             telemetryText = CreateUIText("Telemetry", centerCanvas.transform, new Vector2(0, -300), new Vector2(700, 70), 13, TextAnchor.UpperCenter, new Color(0.45f, 0.9f, 1f), "");
 
             BuildReticle(centerCanvas.transform);
@@ -1523,7 +1545,7 @@ namespace Gundam.EditorTools
             CreateUIText("Label", canvas.transform, new Vector2(0, 195), new Vector2(340, 26), 16, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "WEAPON");
 
             Text nameText = CreateUIText("WeaponName", canvas.transform, new Vector2(0, 130), new Vector2(340, 34), 22, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "HEAD VULCAN");
-            Text ammoText = CreateUIText("AmmoReadout", canvas.transform, new Vector2(0, 80), new Vector2(340, 26), 18, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "AMMO 200/200");
+            Text ammoText = CreateUIText("AmmoReadout", canvas.transform, new Vector2(0, 80), new Vector2(340, 26), 18, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "AMMO 060/060");
 
             CreateUIImage("AmmoGauge_Bg", canvas.transform, new Vector2(0, 30), new Vector2(300, 22), new Color(0.08f, 0.1f, 0.16f, 0.9f));
             GameObject fillGo = new GameObject("AmmoGauge_Fill");
@@ -1614,14 +1636,44 @@ namespace Gundam.EditorTools
             }
         }
 
-        /// <summary>A World Space Canvas anchored just in front of a display panel's screen face.</summary>
+        /// <summary>A World Space Canvas anchored just in front of a display panel's screen face.
+        ///
+        /// FIX for the long-standing "디스플레이가 파랗기만 해 / 글자가 전혀 안 보임" and
+        /// "디스플레이 3개 있는곳에 발칸 총알 개수가 안나옴" reports - root cause confirmed
+        /// by inspecting the built GundamCockpit scene in the Editor: every caller passes
+        /// the SCALED screen cube from CreatePolarScreen (e.g. 0.42 x 0.42 x 0.02) as the
+        /// anchor, and this used to parent the canvas directly UNDER that cube at local
+        /// z = -0.015. In the cube's scaled local space that is only 0.3 mm from the
+        /// cube's center, while its front face is 10 mm away - so every canvas sat
+        /// INSIDE the opaque screen cube and was completely hidden (solid blue screen,
+        /// zero text). It also inherited the cube's non-uniform scale, squashing the
+        /// side screens' canvases to 3.6 cm wide.
+        ///
+        /// Now the canvas is parented to the cube's own (unscaled) parent - the panel
+        /// root CreatePolarScreen builds - and placed 2 mm in front of the cube's real
+        /// front face, with the cube's rotation. worldScale was always sized for an
+        /// unscaled parent (760 x 0.00054 = 0.41 m on the 0.42 m center screen, 380 x
+        /// 0.00047 = 0.18 m on the 0.20 m side screens), so the UI now fills each screen
+        /// as originally intended. Falls back to the old behavior if the anchor somehow
+        /// has no parent.</summary>
         static Canvas CreateWorldCanvas(string name, Transform anchor, Vector2 sizeDelta, float worldScale)
         {
             GameObject canvasGo = new GameObject(name);
             RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
-            canvasGo.transform.SetParent(anchor, false);
-            canvasGo.transform.localPosition = new Vector3(0, 0, -0.015f);
-            canvasGo.transform.localRotation = Quaternion.identity;
+            Transform panelRoot = anchor.parent;
+            if (panelRoot != null)
+            {
+                canvasGo.transform.SetParent(panelRoot, false);
+                float frontFaceOffset = anchor.localScale.z * 0.5f + 0.002f;
+                canvasGo.transform.localPosition = anchor.localPosition + anchor.localRotation * new Vector3(0f, 0f, -frontFaceOffset);
+                canvasGo.transform.localRotation = anchor.localRotation;
+            }
+            else
+            {
+                canvasGo.transform.SetParent(anchor, false);
+                canvasGo.transform.localPosition = new Vector3(0, 0, -0.015f);
+                canvasGo.transform.localRotation = Quaternion.identity;
+            }
             canvasGo.transform.localScale = Vector3.one * worldScale;
             canvasRect.sizeDelta = sizeDelta;
 
@@ -2182,21 +2234,26 @@ namespace Gundam.EditorTools
             CreateSphere(name + "_GripBall", handleGo.transform, Vector3.zero,
                 new Vector3(0.10f, 0.10f, 0.10f), accentMat);
 
-            CreateSphere(name + "_ThumbButton", handleGo.transform, new Vector3(0f, 0.045f, -0.015f),
+            GameObject thumbButton = CreateSphere(name + "_ThumbButton", handleGo.transform, new Vector3(0f, 0.045f, -0.015f),
                 new Vector3(0.022f, 0.022f, 0.022f), buttonMat);
 
             // Per-finger buttons curling across the front face of the grip
             // ball, one under where each of the four fingers naturally
             // rests when wrapped around it (per request: "손가락별로
-            // 버튼이있어서 사용할거야"). Visual/physical placeholders only -
-            // not wired to any action yet, same as ThumbButton/Trigger.
-            CreateSphere(name + "_IndexButton", handleGo.transform, new Vector3(-0.026f, 0.030f, 0.040f),
+            // 버튼이있어서 사용할거야"). These positions are now only the
+            // starting guess: per request ("버튼 5개를 손가락 끝마디 위치로
+            // 정확히 옮겨줘"), JoystickFingerButtons (added below) re-fits all
+            // 5 onto the ball surface right under the pilot's REAL tracked
+            // fingertip segments shortly after each grab, and turns them into
+            // pressable buttons (the thumb one fires the Head Vulcan on the
+            // right stick).
+            GameObject indexButton = CreateSphere(name + "_IndexButton", handleGo.transform, new Vector3(-0.026f, 0.030f, 0.040f),
                 new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            CreateSphere(name + "_MiddleButton", handleGo.transform, new Vector3(-0.009f, 0.014f, 0.049f),
+            GameObject middleButton = CreateSphere(name + "_MiddleButton", handleGo.transform, new Vector3(-0.009f, 0.014f, 0.049f),
                 new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            CreateSphere(name + "_RingButton", handleGo.transform, new Vector3(0.009f, -0.004f, 0.050f),
+            GameObject ringButton = CreateSphere(name + "_RingButton", handleGo.transform, new Vector3(0.009f, -0.004f, 0.050f),
                 new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            CreateSphere(name + "_PinkyButton", handleGo.transform, new Vector3(0.026f, -0.022f, 0.044f),
+            GameObject pinkyButton = CreateSphere(name + "_PinkyButton", handleGo.transform, new Vector3(0.026f, -0.022f, 0.044f),
                 new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
 
             if (isRight)
@@ -2222,6 +2279,20 @@ namespace Gundam.EditorTools
             lever.gripPoint = gripPointGo.transform;
             lever.leftHandTracker = left;
             lever.rightHandTracker = right;
+
+            // Fingertip-fitted, pressable buttons - see JoystickFingerButtons.cs.
+            JoystickFingerButtons fingerButtons = baseGo.AddComponent<JoystickFingerButtons>();
+            fingerButtons.lever = lever;
+            fingerButtons.hand = isRight ? right : left;
+            fingerButtons.handle = handleGo.transform;
+            fingerButtons.buttons = new Transform[]
+            {
+                thumbButton.transform, indexButton.transform, middleButton.transform,
+                ringButton.transform, pinkyButton.transform,
+            };
+            fingerButtons.gripRadius = 0.05f; // GripBall above is 0.10 across
+            fingerButtons.pressedMaterial = MakeEmissiveMat(new Color(0.9f, 0.95f, 0.9f), new Color(1f, 1f, 0.6f));
+
             return lever;
         }
 

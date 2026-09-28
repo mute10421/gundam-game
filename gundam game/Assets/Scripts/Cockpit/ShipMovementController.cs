@@ -7,17 +7,21 @@ namespace Gundam.Cockpit
     /// GameObject - MobileSuitRoot, the root that the cockpit interior and the XR
     /// Origin are parented under, so the whole cockpit + player move together).
     ///
-    /// Controls (per CockpitHUD's own pre-existing "THROTTLE {l.y}   TURN {l.x}"
-    /// readout label, which was always the intended mapping):
-    ///   - Push/pull the stick forward/back (tiltInput.y) = move forward/back.
-    ///   - Push the stick left/right (tiltInput.x) = turn (yaw) left/right.
-    ///   The stick is a push/pull/slide flight-stick (see JoystickLever) - it
-    ///   doesn't rotate or twist in place - so yaw is driven by the stick's
-    ///   LEFT/RIGHT POSITION. There is no separate sideways strafe: the stick's
-    ///   X axis is dedicated to turning (pushing the stick right both strafing
-    ///   AND turning at once would fight each other), and turning is itself a
-    ///   valid way to change the suit's direction of travel per request
-    ///   ("왼쪽으로 밀기 -> Gundam 왼쪽 이동/원하는 방향 전환").
+    /// Controls:
+    ///   - Push/pull the stick forward/back (tiltInput.y) = move forward/back
+    ///     along the suit's current heading.
+    ///   - Push the stick left/right (tiltInput.x) = turn (yaw) the suit's
+    ///     heading, AND immediately strafe/slide the suit sideways along that
+    ///     same heading's right vector. Per report ("옆으로가 잘 안감. 옆으로
+    ///     해도 앞으로 하고나서 옆으로 해야 옆으로감. 그냥 옆으로 해도 갈 수
+    ///     있게 해야함"): a pure left/right push used to ONLY accumulate
+    ///     HeadingYaw (a turn-in-place with zero translation), so nothing
+    ///     visibly moved until forward/back thrust was also applied - the suit
+    ///     only appeared to "go sideways" once it was already moving forward
+    ///     and then curved into the new heading. The strafe term below is
+    ///     ADDED on top of (not instead of) that existing turn behavior, so
+    ///     the stick's left/right position now moves the suit immediately by
+    ///     itself, with no forward input required.
     ///
     /// Per report ("LeftJoystick을 움직여도 Gundam/MobileSuit가 실제로 이동하지
     /// 않는다") this class was re-audited end to end: leftStick is assigned in
@@ -64,6 +68,11 @@ namespace Gundam.Cockpit
         [Tooltip("Stick input below this magnitude (per axis) is treated as 0, so the suit doesn't drift/creep from tiny hand jitter while the stick is resting near center.")]
         [Range(0f, 0.3f)] public float inputDeadZone = 0.08f;
 
+        /// <summary>Overall planar movement speed (always >= 0) - the magnitude of
+        /// the suit's actual combined forward/back + strafe velocity this frame, so
+        /// a HUD speedometer reads correctly whether the suit is moving straight,
+        /// strafing sideways, or both at once (previously this only reflected
+        /// forward/back thrust and read as 0 while strafing).</summary>
         public float CurrentSpeed { get; private set; }
 
         /// <summary>The mobile suit's own current heading (yaw, in world-space
@@ -91,14 +100,21 @@ namespace Gundam.Cockpit
 
             Quaternion heading = Quaternion.Euler(0f, HeadingYaw, 0f);
             Vector3 headingForward = heading * Vector3.forward;
+            Vector3 headingRight = heading * Vector3.right;
 
-            // Forward/back push/pull = forward/back thrust, measured against the
+            // Forward/back push/pull = forward/back thrust, PLUS left/right
+            // push/pull = an immediate sideways strafe (added per the report
+            // in the class doc comment above) - both measured against the
             // tracked heading above instead of transform.forward (same result
-            // when nothing else ever rotates this transform, which is guaranteed
-            // - see above). This is what actually moves MobileSuitRoot (and so
-            // the whole cockpit + XR Origin + player riding along under it).
-            CurrentSpeed = t.y * maxMoveSpeed;
-            transform.position += headingForward * (CurrentSpeed * Time.deltaTime);
+            // when nothing else ever rotates this transform, which is
+            // guaranteed - see above). Diagonal input is clamped to length 1
+            // first so pushing the stick to a corner doesn't move faster than
+            // pushing it straight in one axis.
+            Vector2 moveInput = t.sqrMagnitude > 1f ? t.normalized : t;
+            Vector3 planarVelocity = (headingForward * moveInput.y + headingRight * moveInput.x) * maxMoveSpeed;
+
+            CurrentSpeed = planarVelocity.magnitude;
+            transform.position += planarVelocity * Time.deltaTime;
         }
 
         /// <summary>Zeroes out small stick input near center (so hand jitter while

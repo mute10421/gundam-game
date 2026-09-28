@@ -28,6 +28,26 @@ namespace Gundam.Cockpit
     /// rather than via Interaction Layer Mask settings - so nothing in Project
     /// Settings/the XR Interaction Toolkit's own layer configuration needs to be
     /// touched for this to work.
+    ///
+    /// FIXED per report ("RightJoystick은 잘 안 잡히고" - even the correct,
+    /// right-hand-only grab attempts were frequently refused): the check used
+    /// to require args.interactorObject.transform to be the EXACT SAME
+    /// Transform reference as 'onlyAllowedInteractor' (the "Near-Far
+    /// Interactor" GameObject GundamCockpitSetup.cs's WireJoystickHandInteractors
+    /// found via FindDeepChild). If XRI's actual runtime select event ever
+    /// fires from a CHILD of that GameObject instead of that exact GameObject
+    /// (its own near/far sub-interactor sub-object, for instance - this
+    /// project only reads XRI's own C# API, it can't inspect how the imported
+    /// sample prefab's internals actually dispatch selection at runtime), the
+    /// old exact-reference check would wrongly treat a genuine right-hand grab
+    /// as "the wrong interactor" and force-cancel it via
+    /// CancelInteractableSelection - read as "잘 안 잡힘" (grabs simply
+    /// getting refused). Now uses Transform.IsChildOf, which is still fully
+    /// hand-exclusive (LeftJoystick's and RightJoystick's allowed interactors
+    /// live under entirely separate "Left Hand"/"Right Hand" subtrees, so one
+    /// can never satisfy the other's check) but also accepts a select event
+    /// from anything under that same interactor's own hierarchy, not only an
+    /// exact match on one specific GameObject.
     /// </summary>
     [RequireComponent(typeof(XRSimpleInteractable))]
     public class HandExclusiveGrabAdapter : MonoBehaviour
@@ -62,7 +82,12 @@ namespace Gundam.Cockpit
 
         void OnSelectEntered(SelectEnterEventArgs args)
         {
-            if (onlyAllowedInteractor != null && args.interactorObject.transform != onlyAllowedInteractor)
+            // IsChildOf (not exact reference equality - see the class doc
+            // comment's FIXED note) so a select event firing from some
+            // sub-object of the allowed interactor's own hierarchy still
+            // counts as that hand, while a different hand's entirely separate
+            // interactor subtree still never matches.
+            if (onlyAllowedInteractor != null && !args.interactorObject.transform.IsChildOf(onlyAllowedInteractor))
             {
                 // Wrong hand reached across and selected this stick (e.g. the
                 // Near-Far Interactor's far-ray component, or simply the other

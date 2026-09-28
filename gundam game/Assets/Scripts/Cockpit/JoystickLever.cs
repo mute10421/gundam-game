@@ -22,7 +22,8 @@ namespace Gundam.Cockpit
     ///    even if the XRI wiring above is ever missing.
     /// Either way, once grabbed, the actual movement math below is 100% this
     /// script's own - XRI is only ever used as a yes/no "is this stick selected"
-    /// signal, never to move the object itself.
+    /// signal, never to move the object itself (see the AUDIT note further down
+    /// for exactly what was checked to confirm that).
     ///
     /// Per report ("왼손으로 LeftJoystick을 잡고 오른손으로 RightJoystick을 잡으면
     /// 두 조종간이 동시에 반응하거나 서로의 손 움직임에 반응함") - re-audited every
@@ -45,11 +46,10 @@ namespace Gundam.Cockpit
     /// 내 몸 쪽/손 쪽으로 순간적으로 끌려온다... 손이 조종간의 어디를 잡았든 현재
     /// 조종간 위치를 그대로 유지해야 한다... 조종간을 손 위치로 스냅하지 않는다"):
     /// an EARLIER version of this script snapped 'handle' directly onto the
-    /// hand's own position the instant a grab started (see the class's edit
-    /// history / previous doc comment here) - that is exactly the bug that made
-    /// the stick appear to fly toward the player's hand/body on every grab,
-    /// wherever on the handle they actually grabbed. That snap is GONE. The
-    /// current model instead:
+    /// hand's own position the instant a grab started - that is exactly the bug
+    /// that made the stick appear to fly toward the player's hand/body on every
+    /// grab, wherever on the handle they actually grabbed. That snap is GONE.
+    /// The current model instead:
     ///   - On the very first grabbed frame, records ONLY two reference points
     ///     - grabStartHandLocalPosition (the hand's pivot-local position right
     ///     now) and grabStartJoystickLocalPosition (the handle's own CURRENT
@@ -63,7 +63,7 @@ namespace Gundam.Cockpit
     ///     is preserved for the rest of the grab: moving the hand by some
     ///     amount moves the handle by that same amount, starting from wherever
     ///     it already was - never re-anchored to the hand's own position.
-    ///   - 'gripPoint' is now purely a cosmetic/visual marker (the grip ball's
+    ///   - 'gripPoint' is purely a cosmetic/visual marker (the grip ball's
     ///     center, for gizmos/future reference) - it is NEVER read to move,
     ///     snap, or offset the handle/pivot/stick's actual Transform anywhere
     ///     in this script.
@@ -82,62 +82,20 @@ namespace Gundam.Cockpit
     ///     with the same moving cockpit as the pivot does - and since
     ///     handMovement is a difference of two such pivot-local samples, it
     ///     inherits the same cancellation.
-    ///   - Ongoing tracking is still lightly SMOOTHED and spike-guarded (see
-    ///     "Input Stabilization" below) - only the grab-START frame is special
-    ///     (it must do nothing at all to handle.localPosition, not even a
-    ///     smoothed nudge, so there is truly zero motion the instant of grab).
     ///
     /// Movement model (per request - "실제 비행기/로봇 조종간처럼 손으로 잡고
     /// 앞뒤/좌우로 밀고 당기는 방식"):
-    ///   - The Base (this GameObject / pivot) NEVER moves. Only the Stick
-    ///     ('handle') moves, within a flat X (left/right) / Z (forward/back push)
-    ///     plane relative to the Base - Y (height) never changes, and the Stick
-    ///     never rotates in place.
+    ///   - The Base (this GameObject's 'pivot' child) NEVER moves or rotates.
+    ///     Only the Stick ('handle') moves, within a flat X (left/right) / Z
+    ///     (forward/back push) plane relative to the Base - Y (height) never
+    ///     changes, and the Stick's OWN localRotation never changes either
+    ///     (see the FIXED note below - this is now actively enforced, not just
+    ///     assumed).
     ///   - tiltInput keeps its original public meaning/shape (X = left/right,
     ///     Y = forward/back push, each -1..1) so every existing consumer
     ///     (ShipMovementController, WeaponAimFireController, CockpitHUD) keeps
     ///     working completely unmodified - it's just derived from clamped
     ///     position now instead of a tilt angle.
-    ///
-    /// Input stabilization (per report - "손 움직임을 조이스틱이 살짝 늦게 따라오는
-    /// 느낌... 감도가 너무 민감함... 가끔 손 추적값이 순간적으로 튀면서 기체가
-    /// 갑자기 엉뚱한 방향으로 마구 날아감" - AND a later, contradicting report that
-    /// this made the stick barely follow the hand at all: "손을 앞으로 밀어도
-    /// 조종간이 거의 안 움직이거나 입력이 제대로 나오지 않는다"): applied ONLY to
-    /// ongoing tracking, never to the grab-start frame above. The two reports
-    /// are reconciled by NOT double-lagging the signal:
-    ///   1) The spike/glitch guard now compares this frame's RAW hand position
-    ///      against LAST frame's RAW hand position (not the target against
-    ///      itself) - a genuine, deliberate hand push of even the whole travel
-    ///      range in one frame is never mistaken for a glitch, only a true
-    ///      tracking-loss-style teleport (far larger than the entire lateral/
-    ///      depth range) is rejected, in which case last frame's valid hand
-    ///      movement is reused instead of jumping.
-    ///   2) The tracked TARGET itself (_trackedTargetLocal) is then assigned
-    ///      directly every valid frame - grabStartJoystickPosition +
-    ///      (sensitivity-scaled) handMovement, clamped to range - with no
-    ///      separate per-frame rate limit of its own. An earlier version also
-    ///      clamped how far the TARGET could move each frame (on top of this),
-    ///      which - combined with hand-tracking data that can arrive in
-    ///      already-somewhat-discrete jumps rather than a perfectly smooth
-    ///      stream - produced exactly the "barely moves" symptom: legitimate
-    ///      hand motion kept re-triggering that clamp. Removed.
-    ///   3) positionSensitivity scales handMovement down before it's added to
-    ///      the target, so the same real hand movement produces less stick
-    ///      travel - lower sensitivity without changing the physical travel
-    ///      range (lateralRange/depthRange) or adding any lag.
-    ///   4) smoothingSpeed exponentially smooths the handle's actual position
-    ///      toward that (already-correct, unlagged) target every frame (the
-    ///      same 1 - exp(-speed * dt) idiom already used for the release
-    ///      spring-back below) - this is now the ONLY source of tracking lag,
-    ///      deliberately tuned fast enough to feel immediate and only filter
-    ///      out small per-frame jitter, not real pushes.
-    ///   5) When the currently-grabbed hand's tracking briefly becomes invalid
-    ///      (IsActiveHandTrackingValid false), the tracked target is simply
-    ///      held/frozen for that frame rather than advanced from a stale or
-    ///      garbage sample - so nothing jumps to a default/zero value, and once
-    ///      tracking resumes the raw-hand-delta glitch guard from (1) still
-    ///      protects against a wild first sample after the drop-out.
     /// Finally, deadZone is applied to the derived tiltInput itself (not the
     /// raw position) using the same "zero below threshold, then rescale the
     /// remainder back up to the full -1..1 range" technique already used by
@@ -145,13 +103,170 @@ namespace Gundam.Cockpit
     /// right at the dead zone boundary - and a final explicit clamp/normalize
     /// guards tiltInput's magnitude as defense-in-depth beyond the per-axis
     /// Mathf.Clamp already present.
+    ///
+    /// FIXED per bug report ("조종관을 잡고 이동할때 조종관이 내손따라서 제대로
+    /// 안움직임... 특정방향으로는 안밀림... 로봇이 맘대로 다른데로 가기도함...
+    /// 움직일떄는 오른손 조종장치가 안작동함" - while actually driving
+    /// (MobileSuitRoot in motion), BOTH sticks tracked the hand poorly, pushing
+    /// in some directions seemed to do nothing, the suit drifted on its own,
+    /// and the right stick could stop responding entirely):
+    ///   - Root cause: every frame, this script computes the grabbing hand's
+    ///     position relative to THIS stick's own pivot via
+    ///     pivot.InverseTransformPoint(...) - deliberately, per the class doc
+    ///     comment above, so MobileSuitRoot's own translation (driven by
+    ///     ShipMovementController, a sibling script on the very same moving
+    ///     root all of this - XR Origin, both joysticks, the hand trackers -
+    ///     is parented under) cancels out instead of being mistaken for hand
+    ///     movement. That cancellation only works if the hand-tracking sample
+    ///     this script reads (HandJointTracker.PalmPosition) and the pivot
+    ///     Transform it's compared against both reflect MobileSuitRoot at the
+    ///     SAME point in this frame's timeline. Unity's hand-tracking data
+    ///     arrives via the XR subsystem earlier in the frame than ordinary
+    ///     MonoBehaviour.Update() calls, which are free to run in any relative
+    ///     order unless something pins them down - so on frames where
+    ///     ShipMovementController.Update() happened to run before this script's
+    ///     own Update(), MobileSuitRoot had ALREADY moved by the time
+    ///     pivot.InverseTransformPoint read it, while PalmPosition was still
+    ///     based on MobileSuitRoot's position from before that move - a
+    ///     one-frame-wide mismatch that grows every frame the suit keeps
+    ///     moving, exactly the size of the suit's own per-frame travel.
+    ///   - Fix: [DefaultExecutionOrder(-100)] below guarantees every
+    ///     JoystickLever's Update() (on both LeftJoystick and RightJoystick)
+    ///     runs before ShipMovementController's default-order Update() every
+    ///     single frame, regardless of component add-order or anything else
+    ///     that could otherwise leave it to chance. That means whenever this
+    ///     script reads pivot's Transform, MobileSuitRoot has not yet been
+    ///     moved by this frame's ship-movement update - the same "not yet
+    ///     moved this frame" state PalmPosition already reflects - so the two
+    ///     stay in sync and the pivot-local cancellation this class was always
+    ///     designed around actually holds, every frame, not just by chance.
+    ///
+    /// FIXED per follow-up bug report - Galaxy XR device test ("왼손으로
+    /// LeftJoystick을 잡고 밀면 건담 이동은 정상... 하지만 LeftJoystick 자체가
+    /// 손을 따라오지 않는다... 오른손으로 RightJoystick을 잡으려고 하면 잘 안
+    /// 잡힌다... 오른쪽 조종간을 잡아도 손을 따라가는 것이 아니라 갑자기 크게
+    /// 꺾이거나 이상한 방향으로 회전한다"), which asked specifically for a
+    /// rewrite of the grab tracking itself (offset-based, no snap, 1:1, no
+    /// unnecessary smoothing, position only, and an audit of every system that
+    /// could be moving this stick's Transform):
+    ///   - AUDIT (per that report's item F - "이 세 시스템이 동시에 조종간
+    ///     Transform을 움직이고 있는지 반드시 확인해라"): read
+    ///     HandExclusiveGrabAdapter.cs and GundamCockpitSetup.cs's
+    ///     AttachHandInteractable/WireJoystickHandInteractors end to end.
+    ///     HandExclusiveGrabAdapter only ever calls NotifyXRIGrabbed(bool,
+    ///     Transform) - it does not read or assign transform.position/rotation
+    ///     anywhere. XRSimpleInteractable (unlike XRGrabInteractable, which
+    ///     this project deliberately does NOT use - see the class doc comment
+    ///     above) has no movement/attach behavior of its own; it only raises
+    ///     select/hover events. Grepping every script in this folder for
+    ///     transform.position/rotation/localPosition/localRotation assignments
+    ///     turns up exactly ONE place that ever moves this stick's own
+    ///     handle - this script, right below. So in the C# that ships with
+    ///     this project, there is exactly one mover, as intended. Because the
+    ///     reported symptom was still a real, visible rotation snapping on
+    ///     RightJoystick specifically, and nothing in this project's own code
+    ///     could explain that, LateUpdate() below now unconditionally re-locks
+    ///     handle's rotation AND pivot's entire local transform back to their
+    ///     captured defaults every single frame, regardless of what touched
+    ///     them earlier in that frame or why - this can't identify a cause
+    ///     outside this project's own scripts (for example, an Interactor-side
+    ///     Inspector setting), but it does guarantee the symptom itself cannot
+    ///     happen anymore, from any source, since LateUpdate always has the
+    ///     last word before rendering.
+    ///   - Fix A (no snap on grab, per item A): unchanged from the existing
+    ///     grab-offset model described above - this was already correct and
+    ///     is kept exactly as-is.
+    ///   - Fix B (1:1 tracking, no lag, per item B): the previous version
+    ///     scaled handMovement by a positionSensitivity factor (<1, i.e.
+    ///     less than 1:1) and then exponentially smoothed handle.localPosition
+    ///     toward that target frame over frame - both of those were real,
+    ///     deliberate sources of "feels behind the hand," and per this
+    ///     report's explicit request for exact 1:1 tracking with minimal
+    ///     smoothing, both are removed: handMovement is added to
+    ///     grabStartJoystickLocalPosition at full 1:1 scale, clamped to range,
+    ///     and assigned DIRECTLY to handle.localPosition every valid frame -
+    ///     no Lerp toward a target, no per-frame damping. The only thing still
+    ///     in the way of a raw sample reaching handle.localPosition is the
+    ///     existing frame-to-frame glitch guard (maxHandDeltaPerFrame) - not
+    ///     smoothing, just a rejection of a single frame's tracking-loss-style
+    ///     teleport (still far above any real 1cm-scale hand movement) so a
+    ///     bad sample can't fling the stick to the edge of its range for one
+    ///     frame. On a momentary hand-tracking drop-out, handle.localPosition
+    ///     is now simply left untouched for that frame (holds its last valid
+    ///     position) rather than being smoothed toward a separately-tracked
+    ///     target - simpler, and behaviorally the same "freeze, don't guess."
+    ///   - Fix C (rotation, per item C - the most important part of this
+    ///     report): this script never did assign handle.localRotation or
+    ///     pivot.localPosition/localRotation anywhere, in any version - but
+    ///     "never assigns it" only guarantees it stays fixed if nothing ELSE
+    ///     changes it either, and RightJoystick visibly rotating wildly proved
+    ///     something was. LateUpdate() below now actively holds handle's
+    ///     rotation and pivot's whole local transform at the exact values
+    ///     captured the first frame (CaptureCenterIfNeeded), every single
+    ///     frame, unconditionally - grabbed or not. Combined with Fix B only
+    ///     ever writing handle.localPosition's X/Z (never touching rotation at
+    ///     all), this satisfies items C's every bullet point directly: no
+    ///     hand/interactor/HMD rotation value is ever read into this stick's
+    ///     rotation, the Base/pivot never moves or rotates, and Handle's
+    ///     localRotation always stays at its original default.
+    ///   - Fix D/E (axes, hand-exclusivity, per items D/E): already exactly
+    ///     as specified - handLocal.x/z map to localPosition.x/z, Y is never
+    ///     read into tiltInput, and per-stick leftHandTracker/rightHandTracker
+    ///     null-slots plus HandExclusiveGrabAdapter's onlyAllowedInteractor
+    ///     already fully separate which hand can grab which stick (see
+    ///     CreateJoystick/AttachHandInteractable in GundamCockpitSetup.cs,
+    ///     unchanged) - nothing needed changing here.
+    ///   - ShipMovementController/WeaponAimFireController (item H): not
+    ///     referenced, read, or modified anywhere in this file - tiltInput's
+    ///     public shape/meaning is identical to before, so both keep reading
+    ///     it exactly as they already do.
+    ///
+    /// FIXED per real-device retest after the rewrite above ("조종이 제대로
+    /// 안되고 내가 지정한 위치에 조종장치가 고정되지도 않음... 조종장치에
+    /// 움직임이랑 건담에 움직임이랑 다름... 조종장치가 앞으로는 밀리지도
+    /// 않음" - even after the offset-based/1:1 rewrite, the stick still didn't
+    /// hold still where the hand held it, didn't match the hand's own
+    /// movement, and forward push specifically did nothing):
+    ///   - Root cause: GetActiveHandWorldPosition()/IsActiveHandTrackingValid()
+    ///     previously read _grabbedInteractor.position - the real XRI "Near-Far
+    ///     Interactor" GameObject's own Transform - as the actual MOVEMENT
+    ///     source whenever a grab was XRI-driven, on the assumption that this
+    ///     Transform tracks the physical hand 1:1 the same way
+    ///     HandJointTracker.PalmPosition does. That assumption was never
+    ///     actually verified (this project has no way to run/profile the XRI
+    ///     sample rig's own internal driving of that Transform, only to read
+    ///     its C#), and it directly contradicts the safer structure the very
+    ///     first bug report on this stick asked for: "XRI = 잡았는지/놓았는지
+    ///     이벤트만 담당, JoystickLever = 실제 조종간 위치 계산 담당" (XRI only
+    ///     ever reports grabbed/released - JoystickLever alone computes
+    ///     position). Using the interactor's own Transform for position math
+    ///     broke that separation, and - unlike PalmPosition, which is already
+    ///     proven correct everywhere else in this project (the visible hand
+    ///     meshes, GripAmount/PinchAmount, CalibrationManager's own drag) - if
+    ///     that Transform doesn't move 1:1 with the real hand (for example, if
+    ///     the sample rig only reorients it for far-ray aiming and doesn't
+    ///     translate it the same way for a near-field fist grab), every symptom
+    ///     above follows directly: the stick doesn't hold at the hand's
+    ///     position, doesn't match the hand's movement, and an axis that
+    ///     Transform barely moves along (forward push) does nothing at all.
+    ///   - Fix: GetActiveHandWorldPosition() and IsActiveHandTrackingValid() no
+    ///     longer read _grabbedInteractor at all - both now unconditionally use
+    ///     _activeHand (leftHandTracker/rightHandTracker's PalmPosition/
+    ///     IsTracked), regardless of whether the grab was detected via XRI or
+    ///     via the fallback proximity+gesture check. XRI's NotifyXRIGrabbed
+    ///     is now used exactly as originally requested - a pure yes/no signal
+    ///     (which hand grabbed, and that it's still held) - never as a position
+    ///     source. Nothing about grab DETECTION changed (XRI is still the
+    ///     preferred signal for starting/holding a grab, per hand-exclusivity);
+    ///     only where the actual movement number comes from changed.
     /// </summary>
+    [DefaultExecutionOrder(-100)]
     public class JoystickLever : MonoBehaviour
     {
-        [Header("Hinge / Base (never moves - only 'handle'/Stick moves)")]
-        [Tooltip("The fixed Base. Never moved by this script.")]
+        [Header("Hinge / Base (never moves or rotates - only 'handle'/Stick's localPosition changes)")]
+        [Tooltip("The fixed Base. Actively held at its captured default local position/rotation every frame (see LateUpdate) - never moved or rotated by this script or anything else.")]
         public Transform pivot;
-        [Tooltip("The Stick that slides. Must be a child of Pivot.")]
+        [Tooltip("The Stick that slides. Must be a child of Pivot. Only its localPosition (X/Z) is ever written by this script - its localRotation is actively held at its captured default every frame (see LateUpdate).")]
         public Transform handle;
         [Tooltip("Child of 'handle' marking the grip ball's visual center. Cosmetic/reference only - never used to move, snap, or offset the handle/pivot/stick's actual Transform (see the class doc comment's 'Grab-offset position model').")]
         public Transform gripPoint;
@@ -175,14 +290,11 @@ namespace Gundam.Cockpit
         public float depthRange = 0.08f;
 
         [Header("Release spring-back speed")]
+        [Tooltip("Only used AFTER release, to ease the handle back to center - grab tracking itself (while held) is direct 1:1, no smoothing (see the class doc comment's Fix B).")]
         public float returnLerpSpeed = 6f;
 
-        [Header("Input Stabilization (ongoing tracking only - grab-start snap stays instant)")]
-        [Tooltip("Scales handMovement (hand's movement since grab start) before it's added to the tracked target, each frame, while held. Lower = less sensitive (hand must move further for the same stick travel). ~0.65 is roughly 30-40% less sensitive than 1:1 (1.0). Does NOT add lag - it scales distance, not speed.")]
-        [Range(0.1f, 1f)] public float positionSensitivity = 0.65f;
-        [Tooltip("Exponential smoothing speed applied to the handle's position while tracking toward the target. This is the ONLY intended source of tracking lag/lag-feel - keep it high (20-30) so a real push is followed almost immediately and only small per-frame jitter gets filtered. Does not affect the instant grab-start snap.")]
-        public float smoothingSpeed = 25f;
-        [Tooltip("Meters. A sanity check only, NOT a speed limiter: if the RAW hand position jumps more than this between two consecutive frames, that sample is treated as a tracking-loss glitch and rejected (last valid hand movement is reused) rather than applied. Set well above the stick's own travel range (lateralRange+depthRange) so no ordinary push - however fast - is ever mistaken for a glitch.")]
+        [Header("Grab tracking safety (position only - not smoothing)")]
+        [Tooltip("Meters. A sanity check only, NOT a speed limiter and NOT smoothing: if the RAW hand position jumps more than this between two consecutive frames, that sample is treated as a tracking-loss glitch and rejected (last valid hand movement is reused) rather than applied. Set well above the stick's own travel range (lateralRange+depthRange) so no ordinary push - however fast, including a full 1:1 hand movement - is ever mistaken for a glitch.")]
         public float maxHandDeltaPerFrame = 0.15f;
         [Tooltip("Dead zone (0-1, fraction of lateralRange/depthRange) applied to the final tiltInput, not the raw position. Values inside this radius read as exactly zero; values outside are smoothly rescaled back up to the full -1..1 range, so there is no jump at the boundary.")]
         [Range(0f, 0.3f)] public float deadZone = 0.08f;
@@ -199,51 +311,40 @@ namespace Gundam.Cockpit
         // check further down still runs independently as a fallback.
         bool _xriGrabbed;
 
-        // The EXACT interactor Transform HandExclusiveGrabAdapter's own
-        // OnSelectEntered already confirmed matches this stick's
-        // onlyAllowedInteractor (see that class) - set only alongside
-        // _xriGrabbed becoming true, cleared alongside it becoming false.
-        // Movement math below reads THIS directly while it's set, instead of
-        // leftHandTracker/rightHandTracker, so an XRI-driven grab's position
-        // never passes through any shared/looked-up hand reference at all.
-        Transform _grabbedInteractor;
-
         /// <summary>Called by HandExclusiveGrabAdapter when the real XR Interaction
         /// Toolkit interactor it's watching selects/deselects this stick's handle.
-        /// 'interactorTransform' is that exact interactor's own Transform (e.g.
-        /// this rig's "Left Hand" > "Near-Far Interactor") - already verified by
-        /// the adapter to be the one allowed interactor for this stick before this
-        /// is ever called with grabbed=true. Not meant to be called from anywhere
-        /// else.</summary>
+        /// 'interactorTransform' is accepted for signature compatibility with
+        /// HandExclusiveGrabAdapter's existing call site but is deliberately NOT
+        /// stored or read anywhere anymore (see the class doc comment's most
+        /// recent FIXED note) - this is purely a yes/no "grabbed by the correct
+        /// hand" signal now, never a position source. Not meant to be called from
+        /// anywhere else. This is the ONLY thing HandExclusiveGrabAdapter ever
+        /// calls on this class - it never reads or writes this stick's Transform
+        /// (see the class doc comment's AUDIT note).</summary>
         public void NotifyXRIGrabbed(bool grabbed, Transform interactorTransform = null)
         {
             _xriGrabbed = grabbed;
-            _grabbedInteractor = grabbed ? interactorTransform : null;
         }
 
         /// <summary>The world position to move this stick's handle toward this
-        /// frame: the exact XRI interactor's Transform while it's grabbed that
-        /// way (see _grabbedInteractor above - the most direct, unambiguous
-        /// source available), otherwise the fallback HandJointTracker
+        /// frame - always the fallback HandJointTracker
         /// (leftHandTracker/rightHandTracker - already null-guarded per stick,
         /// never both non-null on the same JoystickLever) that CanGrab/
-        /// StillGrabbing determined is holding it.</summary>
+        /// StillGrabbing (or the XRI grab-start branch in Update) determined is
+        /// holding it. See the class doc comment's most recent FIXED note for
+        /// why this no longer ever reads the XRI interactor's own Transform.</summary>
         Vector3 GetActiveHandWorldPosition()
         {
-            if (_xriGrabbed && _grabbedInteractor != null) return _grabbedInteractor.position;
             return _activeHand != null ? _activeHand.PalmPosition : Vector3.zero;
         }
 
         /// <summary>True while the currently-grabbed hand's position can be
-        /// trusted this frame. An XRI-driven grab reads a live Transform
-        /// (_grabbedInteractor), which has no "untracked" state of its own, so
-        /// it's always considered valid while set. The fallback HandJointTracker
-        /// path is only valid while that tracker itself reports IsTracked. Used
-        /// to freeze the stick's target/position on a momentary hand-tracking
-        /// drop-out instead of advancing it from a stale/garbage sample.</summary>
+        /// trusted this frame - i.e. the fallback HandJointTracker (the same one
+        /// GetActiveHandWorldPosition reads) reports IsTracked. Used to freeze
+        /// the stick's position on a momentary hand-tracking drop-out instead of
+        /// advancing it from a stale/garbage sample.</summary>
         bool IsActiveHandTrackingValid()
         {
-            if (_xriGrabbed && _grabbedInteractor != null) return true;
             return _activeHand != null && _activeHand.IsTracked;
         }
 
@@ -264,18 +365,19 @@ namespace Gundam.Cockpit
         // (equivalently "currentHandLocalPosition - grabOffset", since
         // grabOffset = _grabStartHandLocal - _grabStartJoystickLocal) - the
         // same relative grab point stays under the hand for the whole grab,
-        // and the handle never re-snaps to the hand's own position.
+        // and the handle never re-snaps to the hand's own position (item A).
         Vector3 _grabStartHandLocal;
         Vector3 _grabStartJoystickLocal;
 
         // Raw-hand-position glitch guard state (see maxHandDeltaPerFrame) -
-        // deliberately separate from the target/smoothing state above so a
-        // rejected glitch sample never lags legitimate tracking.
+        // a rejection check only, not smoothing (see Fix B above).
         Vector3 _lastRawHandLocal;
         Vector3 _lastValidHandMovement;
 
-        Vector3 _trackedTargetLocal;     // this frame's exact (sensitivity-scaled, glitch-guarded) target for handle.localPosition, relative to pivot - handle.localPosition itself only ever smooths TOWARD this, never snaps to it
-        Vector3 _centerLocalPos;         // resting/center local position the handle returns to
+        Vector3 _centerLocalPos;          // resting/center local position the handle returns to on release
+        Quaternion _centerLocalRotation;  // handle's own default localRotation - re-asserted every frame (Fix C)
+        Vector3 _pivotDefaultLocalPos;    // pivot's default localPosition - re-asserted every frame (Fix C)
+        Quaternion _pivotDefaultLocalRotation; // pivot's default localRotation - re-asserted every frame (Fix C)
         bool _centerCaptured;
 
         void Start()
@@ -285,8 +387,11 @@ namespace Gundam.Cockpit
 
         void CaptureCenterIfNeeded()
         {
-            if (_centerCaptured || handle == null) return;
+            if (_centerCaptured || handle == null || pivot == null) return;
             _centerLocalPos = handle.localPosition;
+            _centerLocalRotation = handle.localRotation;
+            _pivotDefaultLocalPos = pivot.localPosition;
+            _pivotDefaultLocalRotation = pivot.localRotation;
             _centerCaptured = true;
         }
 
@@ -334,16 +439,15 @@ namespace Gundam.Cockpit
 
                 if (!wasGrabbed)
                 {
-                    // Grab just started. Record ONLY the two reference points
-                    // - grabStartHandLocalPosition and
+                    // Grab just started (item A). Record ONLY the two
+                    // reference points - grabStartHandLocalPosition and
                     // grabStartJoystickLocalPosition (wherever the handle
                     // already was) - handle.localPosition is not assigned
                     // anywhere in this branch, so the stick provably does not
                     // move this frame, regardless of where on the handle the
-                    // hand grabbed.
+                    // hand grabbed. No snap, ever.
                     _grabStartHandLocal = handLocalNow;
                     _grabStartJoystickLocal = handle.localPosition;
-                    _trackedTargetLocal = handle.localPosition;
 
                     // Glitch-guard state also (re)starts clean from this exact
                     // frame's real sample, so the very first held frame right
@@ -351,68 +455,49 @@ namespace Gundam.Cockpit
                     _lastRawHandLocal = handLocalNow;
                     _lastValidHandMovement = Vector3.zero;
                 }
-                else
+                else if (IsActiveHandTrackingValid())
                 {
-                    bool trackingValid = IsActiveHandTrackingValid();
+                    // Glitch guard operates on the RAW hand position,
+                    // frame-to-frame - NOT a smoothing target - so it can
+                    // never mistake a genuinely fast/large intentional push
+                    // (or a full-range 1:1 hand movement) for a glitch; only a
+                    // true tracking-loss-style teleport gets rejected, in
+                    // which case last frame's valid movement is reused
+                    // instead of jumping.
+                    Vector3 rawHandFrameDelta = handLocalNow - _lastRawHandLocal;
+                    rawHandFrameDelta.y = 0f;
 
-                    if (trackingValid)
+                    Vector3 handMovement = handLocalNow - _grabStartHandLocal;
+                    handMovement.y = 0f; // item D - Y is never used for tracking/input
+
+                    if (rawHandFrameDelta.magnitude > maxHandDeltaPerFrame)
                     {
-                        // Glitch guard operates on the RAW hand position,
-                        // frame-to-frame - NOT on the target - so it can never
-                        // mistake a genuinely fast/large intentional push for
-                        // a glitch (the whole travel range is only 8cm either
-                        // way, so legitimate motion is always small in
-                        // absolute terms; maxHandDeltaPerFrame's default sits
-                        // well above that). Only a true tracking-loss-style
-                        // teleport gets rejected, in which case last frame's
-                        // valid movement is reused instead of jumping.
-                        Vector3 rawHandFrameDelta = handLocalNow - _lastRawHandLocal;
-                        rawHandFrameDelta.y = 0f;
-
-                        Vector3 handMovement = handLocalNow - _grabStartHandLocal;
-                        handMovement.y = 0f;
-
-                        if (rawHandFrameDelta.magnitude > maxHandDeltaPerFrame)
-                        {
-                            handMovement = _lastValidHandMovement;
-                        }
-                        else
-                        {
-                            _lastValidHandMovement = handMovement;
-                        }
-                        _lastRawHandLocal = handLocalNow;
-
-                        // targetJoystickPosition = grabStartJoystickPosition +
-                        // handMovement (sensitivity-scaled) - assigned
-                        // DIRECTLY every valid frame, not accumulated/rate-
-                        // limited frame-over-frame, so the target itself never
-                        // lags behind the hand - only the final smoothing step
-                        // below (smoothingSpeed) adds any lag, and only a
-                        // small, deliberately fast amount of it.
-                        _trackedTargetLocal = ClampToRange(_grabStartJoystickLocal + handMovement * positionSensitivity);
+                        handMovement = _lastValidHandMovement;
                     }
-                    // else: hand tracking is momentarily invalid - hold
-                    // _trackedTargetLocal, _lastRawHandLocal and
-                    // _lastValidHandMovement exactly as they were, rather than
-                    // advancing from a stale/garbage sample. Once tracking
-                    // resumes, the glitch guard above still protects against a
-                    // wild first sample right after the drop-out.
+                    else
+                    {
+                        _lastValidHandMovement = handMovement;
+                    }
+                    _lastRawHandLocal = handLocalNow;
 
-                    // Smooth (not rigid) approach toward the tracked target -
-                    // this is the ONLY source of tracking lag, deliberately
-                    // fast (see smoothingSpeed) so a real push is followed
-                    // almost immediately and only small per-frame jitter is
-                    // filtered out. The grab-start frame above never reaches
-                    // here (handle.localPosition already equals
-                    // _trackedTargetLocal that frame, so this is a no-op the
-                    // instant a grab begins - still zero motion on grab).
-                    float smoothT = 1f - Mathf.Exp(-smoothingSpeed * Time.deltaTime);
-                    handle.localPosition = Vector3.Lerp(handle.localPosition, _trackedTargetLocal, smoothT);
+                    // Item B: exact 1:1 - handMovement is added at full scale
+                    // (no sensitivity factor), range-clamped ONLY at the very
+                    // end, and assigned DIRECTLY to handle.localPosition - no
+                    // per-frame smoothing/lerp toward a separate target, so
+                    // there is no lag between the hand moving and the stick
+                    // moving.
+                    handle.localPosition = ClampToRange(_grabStartJoystickLocal + handMovement);
                 }
+                // else: hand tracking is momentarily invalid - handle.localPosition
+                // is simply left untouched this frame (holds its last valid
+                // position) rather than advancing from a stale/garbage sample.
+                // Once tracking resumes, the glitch guard above still protects
+                // against a wild first sample right after the drop-out.
             }
             else
             {
-                // Released - smoothly ease back to center.
+                // Released - smoothly ease back to center. This is release
+                // polish only, not grab-tracking, so it keeps its own lerp.
                 float lerpT = 1f - Mathf.Exp(-returnLerpSpeed * Time.deltaTime);
                 handle.localPosition = Vector3.Lerp(handle.localPosition, _centerLocalPos, lerpT);
             }
@@ -433,6 +518,28 @@ namespace Gundam.Cockpit
             // magnitude ever exceeding 1, however it might have been produced.
             if (result.magnitude > 1f) result = result.normalized;
             tiltInput = new Vector2(Mathf.Clamp(result.x, -1f, 1f), Mathf.Clamp(result.y, -1f, 1f));
+        }
+
+        /// <summary>Item C, the core fix for the "조종간이 갑자기 크게 꺾이거나
+        /// 이상한 방향으로 회전한다" report: unconditionally re-asserts handle's
+        /// rotation and pivot's entire local transform back to the defaults
+        /// captured in CaptureCenterIfNeeded, every single frame, regardless of
+        /// grabbed state or of anything else that may have touched them earlier
+        /// in this same frame. Runs in LateUpdate specifically so it is always
+        /// the last write before rendering - nothing later in the frame can
+        /// still leave a stray rotation/position on this stick, whatever its
+        /// source (this project's own scripts were audited and found NOT to do
+        /// this - see the class doc comment's AUDIT note - but this guard does
+        /// not depend on having found the exact external cause to work).</summary>
+        void LateUpdate()
+        {
+            if (!_centerCaptured) return;
+            if (handle != null) handle.localRotation = _centerLocalRotation;
+            if (pivot != null)
+            {
+                pivot.localPosition = _pivotDefaultLocalPos;
+                pivot.localRotation = _pivotDefaultLocalRotation;
+            }
         }
 
         /// <summary>Zeroes |v| inside deadZone, then rescales the remainder

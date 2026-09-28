@@ -83,6 +83,13 @@ namespace Gundam.EditorTools
             GameObject suitRoot = new GameObject("MobileSuitRoot");
             ShipMovementController ship = suitRoot.AddComponent<ShipMovementController>();
 
+            // Shared vitals data for the 3-display Cockpit HUD (FrontDisplay's
+            // status badge + LeftDisplay's gauges both read the same
+            // CockpitHUDManager.Vitals instance - see that class). No
+            // dependencies of its own, so it's created early and wired into
+            // BuildSystemCheckDisplay/CockpitHUD below as they're built.
+            CockpitHUDManager hudManager = suitRoot.AddComponent<CockpitHUDManager>();
+
             GameObject interior = new GameObject("CockpitInterior");
             interior.transform.SetParent(suitRoot.transform, false);
 
@@ -168,8 +175,9 @@ namespace Gundam.EditorTools
             //     left aux screen now shows a live camera feed from the
             //     Gundam's head (see gundamHeadCamTex above), per request
             //     ("건담에 머리에 시선이 내 콕핏 화면에 나와야해"). ---
-            BuildSystemCheckDisplay(interior.transform, displayMat, hullMat, gundamHeadCamTex,
-                out Text telemetryText, out Text weaponNameText, out Text ammoText);
+            BuildSystemCheckDisplay(interior.transform, displayMat, hullMat, gundamHeadCamTex, hudManager,
+                out Text telemetryText, out Text speedText, out Text statusText,
+                out CockpitStatusHUD statusHUD, out CockpitWeaponHUD weaponHUD);
 
             // --- Orbit/HUD ring: a big floating compass-style reticle overlaying
             //     the live head-cam view now shown on the dome itself (per request,
@@ -246,9 +254,17 @@ namespace Gundam.EditorTools
             hud.leftStick = leftStick;
             hud.rightStick = rightStick;
             hud.infoText = telemetryText;
-            hud.weapon = weapon;
-            hud.weaponNameText = weaponNameText;
-            hud.ammoText = ammoText;
+            // Per the 3-display Cockpit HUD request, the weapon readout moved
+            // to RightDisplay's CockpitWeaponHUD (driven by HeadVulcanController,
+            // wired further below once that component exists) - the old
+            // turret's weapon/weaponNameText/ammoText fields are left unset
+            // (CockpitHUD.Update() already no-ops when they're null), not
+            // deleted, so WeaponAimFireController itself is completely
+            // untouched and still fully functional if ever wired up again.
+            hud.ship = ship;
+            hud.hudManager = hudManager;
+            hud.speedText = speedText;
+            hud.statusText = statusText;
 
             // --- XR Origin (camera + hand tracking space) ---
             // Y is 0, not a seat-height offset: the Starter Assets XR Origin's
@@ -296,6 +312,86 @@ namespace Gundam.EditorTools
                 else
                 {
                     Debug.LogWarning("[Gundam] Could not find the XR rig's camera to drive the Gundam's head-turn tracking.");
+                }
+            }
+
+            // --- Head Vulcan: aims wherever the pilot is actually looking
+            //     (HMD/Main Camera forward), fires on a right-thumb bend - per
+            //     request ("오른손은 조준 장치를 잡아서 조준하는 것이 아니라
+            //     '내가 바라보는 방향'으로 건담 머리의 헤드발칸을 조준하고,
+            //     오른손 엄지를 구부리는 동작으로 발사한다"). Fully independent
+            //     of RightJoystick/WeaponAimFireController (that system drives
+            //     the separate GunTurret built above, not the Gundam's own
+            //     head - confirmed by reading its own wiring just above, so
+            //     there is nothing to disconnect there).
+            //
+            //     Muzzles are two new Transforms placed just in front of the
+            //     SAME "Head" bone PlaceExternalGundam already found for the
+            //     head-cam (re-located here the same way, via FindDeepChild -
+            //     PlaceExternalGundam doesn't return it directly), using the
+            //     exact same world-position-then-SetParent(head, true)
+            //     technique already used for HeadCam above (avoids having to
+            //     guess the head bone's own local scale). Their own facing
+            //     direction is irrelevant to aiming - HeadVulcanController
+            //     always fires along mainCamera.transform.forward, never the
+            //     muzzle's forward - so only their position matters here. ---
+            if (gundamResult != null && gundamResult.instance != null)
+            {
+                Transform vulcanHead = FindDeepChild(gundamResult.instance.transform, "Head");
+                if (vulcanHead != null)
+                {
+                    SkinnedMeshRenderer vulcanMeshRenderer = gundamResult.instance.GetComponentInChildren<SkinnedMeshRenderer>();
+                    Bounds vulcanBounds = vulcanMeshRenderer != null ? vulcanMeshRenderer.bounds : new Bounds(vulcanHead.position, Vector3.one);
+
+                    // Same 92%-of-height eye estimate PlaceExternalGundam's own
+                    // HeadCam placement uses, so both sit at a consistent,
+                    // already-reasoned-through height on the model.
+                    float vulcanEyeHeight = vulcanBounds.min.y + vulcanBounds.size.y * 0.92f;
+                    float vulcanForwardClearance = vulcanBounds.size.y * 0.05f;
+                    float vulcanSideOffset = vulcanBounds.size.x * 0.28f;
+
+                    GameObject muzzleL = new GameObject("HeadVulcanMuzzle_L");
+                    muzzleL.transform.position = new Vector3(vulcanBounds.center.x - vulcanSideOffset, vulcanEyeHeight, vulcanBounds.center.z + vulcanForwardClearance);
+                    muzzleL.transform.rotation = Quaternion.LookRotation(Vector3.forward, Vector3.up);
+                    muzzleL.transform.SetParent(vulcanHead, true);
+
+                    GameObject muzzleR = new GameObject("HeadVulcanMuzzle_R");
+                    muzzleR.transform.position = new Vector3(vulcanBounds.center.x + vulcanSideOffset, vulcanEyeHeight, vulcanBounds.center.z + vulcanForwardClearance);
+                    muzzleR.transform.rotation = Quaternion.LookRotation(Vector3.forward, Vector3.up);
+                    muzzleR.transform.SetParent(vulcanHead, true);
+
+                    Camera vulcanPlayerCamera = xrOrigin.GetComponentInChildren<Camera>(true);
+
+                    HeadVulcanController headVulcan = suitRoot.AddComponent<HeadVulcanController>();
+                    headVulcan.mainCamera = vulcanPlayerCamera;
+                    headVulcan.muzzleLeft = muzzleL.transform;
+                    headVulcan.muzzleRight = muzzleR.transform;
+
+                    // Reuses the SAME XRHandTrackingEvents component already
+                    // sitting on RightHandTracker (created in CreateHandTracker
+                    // above) - adds a second listener to it, does not create a
+                    // new hand-tracking system and never touches Left hand data.
+                    XRHandTrackingEvents rightHandEvents = rightHand.GetComponent<XRHandTrackingEvents>();
+                    headVulcan.SubscribeToRightHand(rightHandEvents);
+
+                    // RightDisplay's WEAPON screen (see BuildWeaponScreenUI,
+                    // called from BuildSystemCheckDisplay earlier) reads Head
+                    // Vulcan's ammo/state - wired here since headVulcan itself
+                    // doesn't exist until this point in the method.
+                    if (weaponHUD != null) weaponHUD.headVulcan = headVulcan;
+
+                    if (vulcanPlayerCamera == null)
+                    {
+                        Debug.LogWarning("[Gundam] Head Vulcan: could not find the XR rig's camera - firing will do nothing until mainCamera is assigned.");
+                    }
+                    if (rightHandEvents == null)
+                    {
+                        Debug.LogWarning("[Gundam] Head Vulcan: RightHandTracker has no XRHandTrackingEvents component - thumb-bend firing will never trigger.");
+                    }
+                }
+                else
+                {
+                    Debug.LogWarning("[Gundam] Could not find a 'Head' bone under ExternalGundam - skipping Head Vulcan muzzle placement.");
                 }
             }
 
@@ -1152,8 +1248,8 @@ namespace Gundam.EditorTools
         // instrument panel), not a far-off eye-level windshield. Per
         // request: "내가 앉은 자리에 허벅지쯤 위에 있는거야 이게".
         // ---------------------------------------------------------------
-        static void BuildSystemCheckDisplay(Transform interior, Material screenMat, Material frameMat, RenderTexture headCamTex,
-            out Text telemetryText, out Text weaponNameText, out Text ammoText)
+        static void BuildSystemCheckDisplay(Transform interior, Material screenMat, Material frameMat, RenderTexture headCamTex, CockpitHUDManager hudManager,
+            out Text telemetryText, out Text speedText, out Text statusText, out CockpitStatusHUD statusHUD, out CockpitWeaponHUD weaponHUD)
         {
             GameObject rootGo = new GameObject("SystemCheckDisplay");
             rootGo.transform.SetParent(interior, false);
@@ -1180,37 +1276,218 @@ namespace Gundam.EditorTools
             BuildTickLadder("SysCheck_TickLadder_L", interior, new Vector3(-0.52f, baseY, eyeZ + radius * 0.7f), frameMat);
             BuildTickLadder("SysCheck_TickLadder_R", interior, new Vector3(0.52f, baseY, eyeZ + radius * 0.7f), frameMat);
 
-            // --- Center screen UI: title, radial tick dial, pilot/weapon/ammo readout ---
+            // --- Center screen UI (FrontDisplay - main tactical HUD): title, radial tick
+            //     dial, SPEED/STATUS readout (replaces the old WeaponName/AmmoReadout -
+            //     that readout now lives on SysCheck_Right's own WEAPON screen instead,
+            //     see BuildWeaponScreenUI), a center reticle, and the relocated head-cam
+            //     inset (per request: "기존 HeadCam 기능은 삭제하지 말고 FrontDisplay
+            //     중앙 전술 HUD의 한쪽 구석에 작은 인셋 영상으로 옮겨줘"). ---
             Canvas centerCanvas = CreateWorldCanvas("SysCheck_Canvas", centerScreen, new Vector2(760, 760), 0.00054f);
             CreateUIImage("Backing", centerCanvas.transform, Vector2.zero, new Vector2(760, 760), new Color(0.02f, 0.03f, 0.08f, 0.75f));
             CreateUIText("Title", centerCanvas.transform, new Vector2(0, 320), new Vector2(600, 50), 30, TextAnchor.MiddleCenter, new Color(0.75f, 0.85f, 1f), "SYSTEM CHECK");
             CreateUIText("Subtitle", centerCanvas.transform, new Vector2(0, 280), new Vector2(600, 26), 15, TextAnchor.MiddleCenter, new Color(0.55f, 0.7f, 0.95f), "- BOOT CONFIGURATION -");
             BuildTickRing(centerCanvas.transform, new Vector2(0, 10), 230f, 48);
             CreateUIText("PilotLabel", centerCanvas.transform, new Vector2(0, 130), new Vector2(500, 24), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "PILOT: ---");
-            weaponNameText = CreateUIText("WeaponName", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "---");
-            ammoText = CreateUIText("AmmoReadout", centerCanvas.transform, new Vector2(0, -40), new Vector2(500, 30), 20, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "AMMO ---/---");
+            speedText = CreateUIText("SpeedReadout", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "SPEED 0.0 m/s");
+            statusText = CreateUIText("StatusReadout", centerCanvas.transform, new Vector2(0, -40), new Vector2(500, 30), 20, TextAnchor.MiddleCenter, new Color(0.3f, 1f, 0.4f), "STATUS: NORMAL");
             telemetryText = CreateUIText("Telemetry", centerCanvas.transform, new Vector2(0, -300), new Vector2(700, 70), 13, TextAnchor.UpperCenter, new Color(0.45f, 0.9f, 1f), "");
 
-            // --- Flanking aux screens: left screen shows the Gundam's head-cam
-            //     feed when available (per request: "건담에 머리에 시선이 내
-            //     콕핏 화면에 나와야해"); right screen keeps the original static
-            //     schematic decoration. ---
+            BuildReticle(centerCanvas.transform);
+
+            // Head-cam inset - only if the FBX/head-cam RenderTexture pipeline is
+            // available (same guard the old full-screen version used); the pipeline
+            // itself (GundamHeadCam360/PlaceExternalGundam's camera + RenderTexture,
+            // and BuildHeadCamScreenUI below) is completely untouched, this just adds
+            // a second, smaller RawImage consumer of the same texture.
             if (headCamTex != null)
             {
-                BuildHeadCamScreenUI(leftScreen, headCamTex);
+                BuildHeadCamInsetUI(centerCanvas.transform, headCamTex);
             }
-            else
-            {
-                // Expected until the FBX is imported and Build Cockpit Scene is
-                // re-run (see PlaceExternalGundam) - falls back to the same
-                // static decoration as before rather than an empty screen.
-                BuildAuxScreenUI(leftScreen, "HEAD CAM - NO SIGNAL");
-            }
-            BuildAuxScreenUI(rightScreen, "AUX-R");
+
+            // --- Left screen (SysCheck_Left) is now the GUNDAM STATUS screen -
+            //     the head-cam feed that used to live here has been relocated to
+            //     the inset above; its own creation/rendering pipeline is untouched. ---
+            statusHUD = BuildStatusScreenUI(leftScreen, hudManager);
+
+            // --- Right screen (SysCheck_Right) is now the WEAPON screen. ---
+            weaponHUD = BuildWeaponScreenUI(rightScreen);
+        }
+
+        /// <summary>Center-screen crosshair reticle for FrontDisplay's tactical HUD - two
+        /// thin crossed bars centered on the same point BuildTickRing's dial surrounds.
+        /// Purely visual, no live data (per request: "간단한 중앙 조준점").</summary>
+        static void BuildReticle(Transform canvasParent)
+        {
+            CreateUIImage("Reticle_H", canvasParent, new Vector2(0, 10), new Vector2(50, 3), new Color(0.6f, 1f, 0.7f, 0.85f));
+            CreateUIImage("Reticle_V", canvasParent, new Vector2(0, 10), new Vector2(3, 50), new Color(0.6f, 1f, 0.7f, 0.85f));
+        }
+
+        /// <summary>Small corner inset on FrontDisplay showing the Gundam's head-cam feed -
+        /// relocated here per request from its old full-screen slot on SysCheck_Left. Reuses
+        /// the SAME RenderTexture that GundamHeadCam360/PlaceExternalGundam's head camera
+        /// already renders into every frame - no new camera or RenderTexture is created here,
+        /// this is just another RawImage sampling that existing texture, anchored to the
+        /// canvas's own top-right corner instead of filling a whole screen.</summary>
+        static void BuildHeadCamInsetUI(Transform canvasParent, RenderTexture tex)
+        {
+            GameObject frameGo = new GameObject("HeadCamInset");
+            RectTransform frameRect = frameGo.AddComponent<RectTransform>();
+            frameGo.transform.SetParent(canvasParent, false);
+            frameRect.anchorMin = frameRect.anchorMax = frameRect.pivot = new Vector2(1f, 1f);
+            frameRect.anchoredPosition = new Vector2(-20f, -20f);
+            frameRect.sizeDelta = new Vector2(200f, 200f);
+
+            Image backing = frameGo.AddComponent<Image>();
+            backing.color = new Color(0.02f, 0.03f, 0.08f, 0.85f);
+
+            GameObject labelGo = new GameObject("Label");
+            RectTransform labelRect = labelGo.AddComponent<RectTransform>();
+            labelGo.transform.SetParent(frameGo.transform, false);
+            labelRect.anchorMin = new Vector2(0f, 1f);
+            labelRect.anchorMax = new Vector2(1f, 1f);
+            labelRect.pivot = new Vector2(0.5f, 1f);
+            labelRect.anchoredPosition = new Vector2(0f, -4f);
+            labelRect.sizeDelta = new Vector2(0f, 18f);
+            Text label = labelGo.AddComponent<Text>();
+            label.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            label.fontSize = 11;
+            label.alignment = TextAnchor.MiddleCenter;
+            label.color = new Color(0.6f, 0.75f, 0.95f);
+            label.text = "HEAD CAM";
+
+            GameObject feedGo = new GameObject("Feed");
+            RectTransform feedRect = feedGo.AddComponent<RectTransform>();
+            feedGo.transform.SetParent(frameGo.transform, false);
+            feedRect.anchorMin = Vector2.zero;
+            feedRect.anchorMax = Vector2.one;
+            feedRect.pivot = new Vector2(0.5f, 0.5f);
+            feedRect.anchoredPosition = new Vector2(0f, -10f);
+            feedRect.sizeDelta = new Vector2(-16f, -34f);
+
+            RawImage feed = feedGo.AddComponent<RawImage>();
+            feed.texture = tex;
+        }
+
+        /// <summary>One gauge row (background bar + colored fill bar + overlaid label/value
+        /// text) for SysCheck_Left's 9-row STATUS screen. Returns the fill Image + Text pair
+        /// that CockpitStatusHUD reads every frame via its own GaugeRefs - this method only
+        /// builds the UI, CockpitStatusHUD (added by BuildStatusScreenUI) does the rendering.</summary>
+        static CockpitStatusHUD.GaugeRefs BuildGaugeRow(Transform canvasParent, float y, string label)
+        {
+            const float barWidth = 300f;
+            const float barHeight = 22f;
+
+            CreateUIImage($"{label}_Bg", canvasParent, new Vector2(0, y), new Vector2(barWidth, barHeight), new Color(0.08f, 0.1f, 0.16f, 0.9f));
+
+            GameObject fillGo = new GameObject($"{label}_Fill");
+            RectTransform fillRect = fillGo.AddComponent<RectTransform>();
+            fillGo.transform.SetParent(canvasParent, false);
+            fillRect.anchorMin = new Vector2(0.5f, 0.5f);
+            fillRect.anchorMax = new Vector2(0.5f, 0.5f);
+            fillRect.pivot = new Vector2(0f, 0.5f);
+            fillRect.anchoredPosition = new Vector2(-barWidth * 0.5f, y);
+            fillRect.sizeDelta = new Vector2(barWidth, barHeight);
+
+            Image fill = fillGo.AddComponent<Image>();
+            fill.color = new Color(0.3f, 1f, 0.4f);
+            fill.type = Image.Type.Filled;
+            fill.fillMethod = Image.FillMethod.Horizontal;
+            fill.fillOrigin = (int)Image.OriginHorizontal.Left;
+            fill.fillAmount = 1f;
+
+            Text text = CreateUIText($"{label}_Text", canvasParent, new Vector2(0, y), new Vector2(barWidth, barHeight), 13,
+                TextAnchor.MiddleCenter, Color.white, $"{label} 100%");
+
+            return new CockpitStatusHUD.GaugeRefs { fill = fill, text = text };
+        }
+
+        /// <summary>SysCheck_Left - GUNDAM STATUS screen. Replaces the old head-cam feed that
+        /// used to live here (moved to a small inset on SysCheck_Center instead - see
+        /// BuildHeadCamInsetUI) with 9 gauge rows: HP, SHIELD, ENERGY, then HEAD/BODY/
+        /// LEFT ARM/RIGHT ARM/LEFT LEG/RIGHT LEG. Builds the canvas + gauge rows and wires
+        /// them into a new CockpitStatusHUD component, which does the actual per-frame
+        /// rendering from the shared CockpitHUDManager.Vitals passed in.</summary>
+        static CockpitStatusHUD BuildStatusScreenUI(Transform screen, CockpitHUDManager hudManager)
+        {
+            Canvas canvas = CreateWorldCanvas("Status_Canvas", screen, new Vector2(380, 440), 0.00047f);
+            CreateUIImage("Backing", canvas.transform, Vector2.zero, new Vector2(380, 440), new Color(0.02f, 0.03f, 0.08f, 0.7f));
+            CreateUIText("Label", canvas.transform, new Vector2(0, 195), new Vector2(340, 26), 16, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "GUNDAM STATUS");
+
+            float y = 155f;
+            const float step = 34f;
+            CockpitStatusHUD.GaugeRefs hpRow = BuildGaugeRow(canvas.transform, y, "HP"); y -= step;
+            CockpitStatusHUD.GaugeRefs shieldRow = BuildGaugeRow(canvas.transform, y, "SHIELD"); y -= step;
+            CockpitStatusHUD.GaugeRefs energyRow = BuildGaugeRow(canvas.transform, y, "ENERGY"); y -= step;
+            CockpitStatusHUD.GaugeRefs headRow = BuildGaugeRow(canvas.transform, y, "HEAD"); y -= step;
+            CockpitStatusHUD.GaugeRefs bodyRow = BuildGaugeRow(canvas.transform, y, "BODY"); y -= step;
+            CockpitStatusHUD.GaugeRefs lArmRow = BuildGaugeRow(canvas.transform, y, "L ARM"); y -= step;
+            CockpitStatusHUD.GaugeRefs rArmRow = BuildGaugeRow(canvas.transform, y, "R ARM"); y -= step;
+            CockpitStatusHUD.GaugeRefs lLegRow = BuildGaugeRow(canvas.transform, y, "L LEG"); y -= step;
+            CockpitStatusHUD.GaugeRefs rLegRow = BuildGaugeRow(canvas.transform, y, "R LEG");
+
+            GameObject hudGo = new GameObject("StatusHUD");
+            hudGo.transform.SetParent(screen, false);
+            CockpitStatusHUD hud = hudGo.AddComponent<CockpitStatusHUD>();
+            hud.hudManager = hudManager;
+            hud.hpGauge = hpRow;
+            hud.shieldGauge = shieldRow;
+            hud.energyGauge = energyRow;
+            hud.headGauge = headRow;
+            hud.bodyGauge = bodyRow;
+            hud.leftArmGauge = lArmRow;
+            hud.rightArmGauge = rArmRow;
+            hud.leftLegGauge = lLegRow;
+            hud.rightLegGauge = rLegRow;
+            return hud;
+        }
+
+        /// <summary>SysCheck_Right - WEAPON screen. Shows current weapon name, ammo count,
+        /// an ammo gauge, and READY/EMPTY/RELOADING, wired to the real HeadVulcanController
+        /// via a new CockpitWeaponHUD component. headVulcan itself is left null here and
+        /// wired later, once HeadVulcanController is created (see the existing Head Vulcan
+        /// wiring block, which now also sets weaponHUD.headVulcan).</summary>
+        static CockpitWeaponHUD BuildWeaponScreenUI(Transform screen)
+        {
+            Canvas canvas = CreateWorldCanvas("Weapon_Canvas", screen, new Vector2(380, 440), 0.00047f);
+            CreateUIImage("Backing", canvas.transform, Vector2.zero, new Vector2(380, 440), new Color(0.02f, 0.03f, 0.08f, 0.7f));
+            CreateUIText("Label", canvas.transform, new Vector2(0, 195), new Vector2(340, 26), 16, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "WEAPON");
+
+            Text nameText = CreateUIText("WeaponName", canvas.transform, new Vector2(0, 130), new Vector2(340, 34), 22, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "HEAD VULCAN");
+            Text ammoText = CreateUIText("AmmoReadout", canvas.transform, new Vector2(0, 80), new Vector2(340, 26), 18, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "AMMO 200/200");
+
+            CreateUIImage("AmmoGauge_Bg", canvas.transform, new Vector2(0, 30), new Vector2(300, 22), new Color(0.08f, 0.1f, 0.16f, 0.9f));
+            GameObject fillGo = new GameObject("AmmoGauge_Fill");
+            RectTransform fillRect = fillGo.AddComponent<RectTransform>();
+            fillGo.transform.SetParent(canvas.transform, false);
+            fillRect.anchorMin = new Vector2(0.5f, 0.5f);
+            fillRect.anchorMax = new Vector2(0.5f, 0.5f);
+            fillRect.pivot = new Vector2(0f, 0.5f);
+            fillRect.anchoredPosition = new Vector2(-150f, 30f);
+            fillRect.sizeDelta = new Vector2(300f, 22f);
+            Image ammoFill = fillGo.AddComponent<Image>();
+            ammoFill.color = new Color(0.3f, 1f, 0.4f);
+            ammoFill.type = Image.Type.Filled;
+            ammoFill.fillMethod = Image.FillMethod.Horizontal;
+            ammoFill.fillOrigin = (int)Image.OriginHorizontal.Left;
+            ammoFill.fillAmount = 1f;
+
+            Text stateText = CreateUIText("StateReadout", canvas.transform, new Vector2(0, -20), new Vector2(340, 34), 24, TextAnchor.MiddleCenter, new Color(0.3f, 1f, 0.4f), "READY");
+
+            GameObject hudGo = new GameObject("WeaponHUD");
+            hudGo.transform.SetParent(screen, false);
+            CockpitWeaponHUD hud = hudGo.AddComponent<CockpitWeaponHUD>();
+            hud.nameText = nameText;
+            hud.ammoText = ammoText;
+            hud.ammoFillImage = ammoFill;
+            hud.stateText = stateText;
+            return hud;
         }
 
         /// <summary>Left aux screen content when the Gundam's head camera feed is available:
-        /// a label plus a live RawImage of the head-cam RenderTexture (see PlaceExternalGundam).</summary>
+        /// a label plus a live RawImage of the head-cam RenderTexture (see PlaceExternalGundam).
+        /// No longer called by BuildSystemCheckDisplay (the head-cam feed now lives in a small
+        /// inset on the center screen instead - see BuildHeadCamInsetUI), but kept exactly as-is
+        /// per instruction not to delete the existing head-cam UI/rendering functionality.</summary>
         static void BuildHeadCamScreenUI(Transform screen, RenderTexture tex)
         {
             Canvas canvas = CreateWorldCanvas("HeadCam_Canvas", screen, new Vector2(380, 440), 0.00047f);

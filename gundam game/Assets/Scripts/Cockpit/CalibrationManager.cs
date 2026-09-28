@@ -62,6 +62,16 @@ namespace Gundam.Cockpit
     /// either hand to press it - see IsHandPressingConfirm - before finishing and
     /// letting the game start.
     ///
+    /// CHANGED per follow-up request ("한쪽씩 설정할때마다 물어봐야함 됬냐고
+    /// 위치"): a single confirm at the very end (after BOTH sticks are placed)
+    /// became a confirm after EACH stick individually - place the left stick,
+    /// confirm just that one, then place the right stick, confirm that one too,
+    /// then finish. Two extra states (WaitingForLeftConfirm/WaitingForRightConfirm)
+    /// were inserted between the existing grab states for this - see the FLOW
+    /// note below. Nothing about HOW a press is detected changed here (still
+    /// IsHandPressingConfirm's grip/pinch gesture, see the FIXED note further
+    /// down for why).
+    ///
     /// FIXED per bug report ("위치를 바꾸려고 조종관을 잡는순간 바닥쪽으로 내려가서
     /// 안올라옴 움겨지지도 않고 그리고 확인 버튼도 안눌림" - grabbing a stick to
     /// reposition it made it drop toward the floor and get stuck there,
@@ -113,10 +123,11 @@ namespace Gundam.Cockpit
     /// FLOW (every app start, no exceptions):
     ///   "지금부터 조종간 위치를 설정합니다 / 왼손으로 왼쪽 조종간을 잡아 원하는
     ///   위치로 옮긴 뒤 놓으세요" -> waits for a real grab+drag+release on
-    ///   LeftJoystick -> same prompt for RightJoystick -> "확인 버튼을 눌러
-    ///   시작하세요", confirm button appears -> waits for either hand to press it
-    ///   -> hides the prompt and the button. Nothing is written to disk, so
-    ///   nothing can get stuck from a previous session.
+    ///   LeftJoystick -> "왼쪽 조종간 위치가 괜찮으면 확인해주세요", confirm button
+    ///   appears -> waits for either hand to press it -> same
+    ///   grab+drag+release+confirm pair for RightJoystick -> hides the prompt
+    ///   and the button, calibration is Complete. Nothing is written to disk,
+    ///   so nothing can get stuck from a previous session.
     ///
     /// ShipMovementController and WeaponAimFireController are not referenced or
     /// modified at all, and movement/combat is never blocked by this script -
@@ -128,8 +139,9 @@ namespace Gundam.Cockpit
         public enum State
         {
             WaitingForLeftGrab,
+            WaitingForLeftConfirm,
             WaitingForRightGrab,
-            WaitingForConfirm,
+            WaitingForRightConfirm,
             Complete
         }
 
@@ -142,15 +154,15 @@ namespace Gundam.Cockpit
         public HandJointTracker rightHandTracker;
         [Tooltip("World-fixed prompt text shown during calibration (see GundamCockpitSetup.cs's BuildCalibrationPromptUI). Optional - calibration still runs (silently) without it.")]
         public Text promptText;
-        [Tooltip("Physical 'press to confirm' button (see GundamCockpitSetup.cs's BuildCalibrationConfirmButton). Only shown during WaitingForConfirm. If left unset, calibration completes immediately once both joysticks are placed instead of waiting for a press.")]
+        [Tooltip("Physical 'press to confirm' button (see GundamCockpitSetup.cs's BuildCalibrationConfirmButton). Shown during WaitingForLeftConfirm/WaitingForRightConfirm (once per stick). If left unset, calibration advances past each confirm step immediately instead of waiting for a press.")]
         public Transform confirmButton;
 
         [Header("Safety")]
         [Tooltip("Meters. While dragging, the Mount is clamped to within this distance of its scene-authored default position - guards against a single bad hand-tracking sample flinging it somewhere absurd. Generous by design so real, deliberate hand movement is never restricted.")]
         public float maxOffsetFromDefault = 0.6f;
-        [Tooltip("During WaitingForConfirm, either hand gripping (fist) at least this much counts as a press - same signal/threshold JoystickLever's own grab detection uses, not a position check.")]
+        [Tooltip("During either per-stick confirm step, either hand gripping (fist) at least this much counts as a press - same signal/threshold JoystickLever's own grab detection uses, not a position check.")]
         [Range(0.1f, 1f)] public float confirmGripThreshold = 0.55f;
-        [Tooltip("During WaitingForConfirm, either hand pinching at least this much counts as a press - same signal/threshold JoystickLever's own grab detection uses, not a position check.")]
+        [Tooltip("During either per-stick confirm step, either hand pinching at least this much counts as a press - same signal/threshold JoystickLever's own grab detection uses, not a position check.")]
         [Range(0.1f, 1f)] public float confirmPinchThreshold = 0.5f;
 
         public State CurrentState { get; private set; } = State.WaitingForLeftGrab;
@@ -192,11 +204,14 @@ namespace Gundam.Cockpit
                 case State.WaitingForLeftGrab:
                     UpdateWaitingForGrab(isLeft: true);
                     break;
+                case State.WaitingForLeftConfirm:
+                    UpdateWaitingForConfirm(State.WaitingForRightGrab);
+                    break;
                 case State.WaitingForRightGrab:
                     UpdateWaitingForGrab(isLeft: false);
                     break;
-                case State.WaitingForConfirm:
-                    UpdateWaitingForConfirm();
+                case State.WaitingForRightConfirm:
+                    UpdateWaitingForConfirm(State.Complete);
                     break;
                 case State.Complete:
                     break;
@@ -223,19 +238,12 @@ namespace Gundam.Cockpit
             else if (wasGrabbed)
             {
                 // Just released - wherever dragging left the Mount is this
-                // stick's base position for the rest of this session.
-                if (isLeft)
-                {
-                    CurrentState = State.WaitingForRightGrab;
-                }
-                else
-                {
-                    // Both joysticks placed - per request ("확인을 누르면 게임이
-                    // 시작되는거고") this no longer completes calibration by
-                    // itself; it waits for an explicit confirm-button press
-                    // instead (see UpdateWaitingForConfirm).
-                    CurrentState = State.WaitingForConfirm;
-                }
+                // stick's base position for the rest of this session, PENDING
+                // this stick's own confirm press (per request - "한쪽씩
+                // 설정할때마다 물어봐야함 됬냐고 위치" - each stick gets its own
+                // confirm step right after it's placed, not one shared confirm
+                // at the very end).
+                CurrentState = isLeft ? State.WaitingForLeftConfirm : State.WaitingForRightConfirm;
                 UpdatePromptText();
             }
 
@@ -244,23 +252,25 @@ namespace Gundam.Cockpit
         }
 
         /// <summary>Waits for either hand to press the physical confirm button
-        /// (see IsHandPressingConfirm) before finishing calibration. If no button
-        /// was wired (confirmButton left null in the Inspector), falls back to
-        /// completing immediately so calibration can never get stuck waiting on
-        /// something that doesn't exist.</summary>
-        void UpdateWaitingForConfirm()
+        /// (see IsHandPressingConfirm) before advancing to nextState - used for
+        /// both the per-stick confirm steps (WaitingForLeftConfirm ->
+        /// WaitingForRightGrab, WaitingForRightConfirm -> Complete). If no
+        /// button was wired (confirmButton left null in the Inspector), falls
+        /// back to advancing immediately so calibration can never get stuck
+        /// waiting on something that doesn't exist.</summary>
+        void UpdateWaitingForConfirm(State nextState)
         {
             if (confirmButton == null)
             {
-                CurrentState = State.Complete;
-                HidePrompt();
+                CurrentState = nextState;
+                UpdatePromptText();
                 return;
             }
 
             if (IsHandPressingConfirm(leftHandTracker) || IsHandPressingConfirm(rightHandTracker))
             {
-                CurrentState = State.Complete;
-                HidePrompt();
+                CurrentState = nextState;
+                UpdatePromptText();
             }
         }
 
@@ -354,6 +364,16 @@ namespace Gundam.Cockpit
                         "왼손으로 왼쪽 조종간을 잡아\n" +
                         "원하는 위치로 옮긴 뒤 놓으세요";
                     promptText.gameObject.SetActive(true);
+                    if (confirmButton != null) confirmButton.gameObject.SetActive(false);
+                    break;
+
+                case State.WaitingForLeftConfirm:
+                    promptText.text =
+                        "COCKPIT CALIBRATION\n" +
+                        "왼쪽 조종간 위치가 괜찮으면\n" +
+                        "손을 쥐거나 꼬집어 확인하세요";
+                    promptText.gameObject.SetActive(true);
+                    if (confirmButton != null) confirmButton.gameObject.SetActive(true);
                     break;
 
                 case State.WaitingForRightGrab:
@@ -362,13 +382,14 @@ namespace Gundam.Cockpit
                         "오른손으로 오른쪽 조종간을 잡아\n" +
                         "원하는 위치로 옮긴 뒤 놓으세요";
                     promptText.gameObject.SetActive(true);
+                    if (confirmButton != null) confirmButton.gameObject.SetActive(false);
                     break;
 
-                case State.WaitingForConfirm:
+                case State.WaitingForRightConfirm:
                     promptText.text =
                         "COCKPIT CALIBRATION\n" +
-                        "위치가 마음에 드시면\n" +
-                        "앞의 확인 버튼을 눌러 시작하세요";
+                        "오른쪽 조종간 위치가 괜찮으면\n" +
+                        "손을 쥐거나 꼬집어 확인하세요";
                     promptText.gameObject.SetActive(true);
                     if (confirmButton != null) confirmButton.gameObject.SetActive(true);
                     break;

@@ -31,6 +31,15 @@ namespace Gundam.Cockpit
     /// by GundamCockpitSetup.cs right after it creates the XR rig (that
     /// happens AFTER this component is created, so it's wired up in a
     /// second pass rather than at construction time).
+    ///
+    /// NOTE: an earlier attempt briefly added a RightJoystick-driven "manual
+    /// look" offset directly to this class (on top of the head-tracking
+    /// below). That has been reverted - per a follow-up, more precise
+    /// request, the right stick now rotates the HeadCam Camera itself
+    /// instead (see HeadCamManualLook.cs, wired onto HeadCam's own
+    /// GameObject in GundamCockpitSetup.cs), so this class is back to doing
+    /// exactly what its class name says: pure head-tracking + the 360
+    /// cubemap feed, nothing else.
     /// </summary>
     public class GundamHeadCam360 : MonoBehaviour
     {

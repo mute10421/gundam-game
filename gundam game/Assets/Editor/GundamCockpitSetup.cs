@@ -176,7 +176,7 @@ namespace Gundam.EditorTools
             //     Gundam's head (see gundamHeadCamTex above), per request
             //     ("건담에 머리에 시선이 내 콕핏 화면에 나와야해"). ---
             BuildSystemCheckDisplay(interior.transform, displayMat, hullMat, gundamHeadCamTex, hudManager,
-                out Text telemetryText, out Text speedText, out Text statusText,
+                out Text telemetryText, out Text speedText, out Text statusText, out Text vulcanAmmoText,
                 out CockpitStatusHUD statusHUD, out CockpitWeaponHUD weaponHUD);
 
             // --- Orbit/HUD ring: a big floating compass-style reticle overlaying
@@ -229,17 +229,23 @@ namespace Gundam.EditorTools
             ship.leftStick = leftStick;
 
             // --- Gun turret (mounted on the suit, aimed by the right stick) ---
+            // Per report ("눈앞에있는 막대기로 만들어친 총열같이 생긴놈을
+            // 지우고"): the turret's own visible meshes (GunHousing/Barrel -
+            // two plain cylinders sitting 2.4m in front of the suit root,
+            // right in the pilot's forward view) were confirmed as this
+            // "stick-shaped barrel" and removed below. GunPivot/MuzzlePoint
+            // stay as plain empty Transforms and WeaponAimFireController stays
+            // fully wired exactly as before - per the same report, its own
+            // aim/fire feature is NOT being removed, only the mesh that was
+            // visually poking into view. (hullMat/gearMat, only ever used to
+            // color those two removed meshes, are now unused by this block -
+            // left as-is, still valid Material params used elsewhere.)
             GameObject turretRoot = new GameObject("GunTurret");
             turretRoot.transform.SetParent(suitRoot.transform, false);
             turretRoot.transform.localPosition = new Vector3(0, 1.0f, 2.4f);
 
             GameObject gunPivot = new GameObject("GunPivot");
             gunPivot.transform.SetParent(turretRoot.transform, false);
-
-            CreateCylinder("GunHousing", gunPivot.transform, new Vector3(0, 0, 0.1f), new Vector3(0.14f, 0.14f, 0.2f), hullMat)
-                .transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-            GameObject barrel = CreateCylinder("Barrel", gunPivot.transform, new Vector3(0, 0, 0.45f), new Vector3(0.07f, 0.5f, 0.07f), gearMat);
-            barrel.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
 
             GameObject muzzle = new GameObject("MuzzlePoint");
             muzzle.transform.SetParent(gunPivot.transform, false);
@@ -265,6 +271,11 @@ namespace Gundam.EditorTools
             hud.hudManager = hudManager;
             hud.speedText = speedText;
             hud.statusText = statusText;
+            // Per report ("내 앞에 디스플레이에 표시가 안됨"): duplicates the
+            // Head Vulcan ammo readout directly on FrontDisplay too (headVulcan
+            // itself is wired further below, once it exists) - RightDisplay's
+            // CockpitWeaponHUD keeps working exactly as before, untouched.
+            hud.vulcanAmmoText = vulcanAmmoText;
 
             // --- XR Origin (camera + hand tracking space) ---
             // Y is 0, not a seat-height offset: the Starter Assets XR Origin's
@@ -312,6 +323,43 @@ namespace Gundam.EditorTools
                 else
                 {
                     Debug.LogWarning("[Gundam] Could not find the XR rig's camera to drive the Gundam's head-turn tracking.");
+                }
+
+                // --- RightJoystick -> external view (per request: "오른손으로
+                //     RightJoystick을 잡고 움직이면 '건담 콕핏에서 바라보는 외부
+                //     화면'이 움직여야 한다"). See CockpitViewController.cs.
+                //
+                //     The previous attempt attached HeadCamManualLook to HeadCam,
+                //     which only rotated HeadCam - that turns FrontDisplay's flat
+                //     inset, but Cockpit_Dome samples a cubemap made by
+                //     Camera.RenderToCubemap, which always renders world-axis-
+                //     aligned faces and IGNORES the camera's rotation, so the
+                //     dome (the main outside view) never moved. It is no longer
+                //     attached (the file is left in place, unused) - using both
+                //     would double-rotate HeadCam.
+                //
+                //     CockpitViewController rotates HeadCam's own localRotation
+                //     AND passes the same rotation to Cockpit_Dome's shader
+                //     (_ViewRotQ), so both outputs turn together. It lives on its
+                //     own GameObject so it's easy to find in the Hierarchy; it
+                //     never writes to its own transform, MobileSuitRoot, the XR
+                //     Origin or Main Camera. WeaponAimFireController still reads
+                //     the same RightJoystick, unchanged. ---
+                GameObject viewCtrlGo = new GameObject("CockpitViewController");
+                viewCtrlGo.transform.SetParent(suitRoot.transform, false);
+                CockpitViewController viewController = viewCtrlGo.AddComponent<CockpitViewController>();
+                viewController.rightJoystick = rightStick;
+                viewController.viewCamera = gundamResult.headCam360.headCam;
+
+                Transform domeTransform = interior.transform.Find("Cockpit_Dome");
+                viewController.domeRenderer = domeTransform != null ? domeTransform.GetComponent<Renderer>() : null;
+
+                Debug.Log("[Gundam] CockpitViewController wired: RightJoystick -> '" +
+                    (viewController.viewCamera != null ? viewController.viewCamera.name : "null") + "' camera + " +
+                    (viewController.domeRenderer != null ? "Cockpit_Dome" : "NO dome renderer found") + ".");
+                if (viewController.domeRenderer == null)
+                {
+                    Debug.LogWarning("[Gundam] CockpitViewController: could not find 'Cockpit_Dome' under CockpitInterior - only the FrontDisplay HEAD CAM inset will turn.");
                 }
             }
 
@@ -366,6 +414,18 @@ namespace Gundam.EditorTools
                     headVulcan.mainCamera = vulcanPlayerCamera;
                     headVulcan.muzzleLeft = muzzleL.transform;
                     headVulcan.muzzleRight = muzzleR.transform;
+                    // Per report ("해드발칸이 발사가 되는지 안보임"): bright
+                    // emissive tracer material for the placeholder bullet -
+                    // see HeadVulcanController.SpawnBullet's own comment on
+                    // why the old default-material 0.04-scale sphere was
+                    // nearly invisible at the muzzle's ~20m distance from the
+                    // pilot's own camera.
+                    headVulcan.bulletMat = MakeEmissiveMat(new Color(0.2f, 0.08f, 0.01f), new Color(1f, 0.55f, 0.15f));
+
+                    // Same report: duplicates the ammo readout onto
+                    // FrontDisplay (hud.vulcanAmmoText was already wired
+                    // earlier, but headVulcan itself doesn't exist until now).
+                    hud.headVulcan = headVulcan;
 
                     // Reuses the SAME XRHandTrackingEvents component already
                     // sitting on RightHandTracker (created in CreateHandTracker
@@ -1249,7 +1309,7 @@ namespace Gundam.EditorTools
         // request: "내가 앉은 자리에 허벅지쯤 위에 있는거야 이게".
         // ---------------------------------------------------------------
         static void BuildSystemCheckDisplay(Transform interior, Material screenMat, Material frameMat, RenderTexture headCamTex, CockpitHUDManager hudManager,
-            out Text telemetryText, out Text speedText, out Text statusText, out CockpitStatusHUD statusHUD, out CockpitWeaponHUD weaponHUD)
+            out Text telemetryText, out Text speedText, out Text statusText, out Text vulcanAmmoText, out CockpitStatusHUD statusHUD, out CockpitWeaponHUD weaponHUD)
         {
             GameObject rootGo = new GameObject("SystemCheckDisplay");
             rootGo.transform.SetParent(interior, false);
@@ -1290,6 +1350,16 @@ namespace Gundam.EditorTools
             CreateUIText("PilotLabel", centerCanvas.transform, new Vector2(0, 130), new Vector2(500, 24), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "PILOT: ---");
             speedText = CreateUIText("SpeedReadout", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "SPEED 0.0 m/s");
             statusText = CreateUIText("StatusReadout", centerCanvas.transform, new Vector2(0, -40), new Vector2(500, 30), 20, TextAnchor.MiddleCenter, new Color(0.3f, 1f, 0.4f), "STATUS: NORMAL");
+            // Per report ("해드발칸이 몇발 남았는지 내앞에 디스플래이에 표시가
+            // 안됨"): RightDisplay's WEAPON screen (CockpitWeaponHUD, see
+            // BuildWeaponScreenUI below) already shows Head Vulcan's ammo, but
+            // it sits 40 degrees off to the side - this duplicates a compact
+            // version directly on FrontDisplay/SysCheck_Center, the screen
+            // straight ahead of the pilot, so it's visible without looking
+            // away while aiming with the head. Placed just under StatusReadout
+            // (y=-40) and well clear of the tick ring (BuildTickRing above,
+            // radius 230 centered at y=10, so its bottom edge is ~y=-220).
+            vulcanAmmoText = CreateUIText("VulcanAmmoReadout", centerCanvas.transform, new Vector2(0, -80), new Vector2(600, 28), 16, TextAnchor.MiddleCenter, new Color(1f, 0.7f, 0.3f), "HEAD VULCAN AMMO 60/60 [READY]");
             telemetryText = CreateUIText("Telemetry", centerCanvas.transform, new Vector2(0, -300), new Vector2(700, 70), 13, TextAnchor.UpperCenter, new Color(0.45f, 0.9f, 1f), "");
 
             BuildReticle(centerCanvas.transform);

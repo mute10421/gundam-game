@@ -10,9 +10,10 @@ namespace Gundam.Cockpit
     /// Controls:
     ///   - Push/pull the stick forward/back (tiltInput.y) = move forward/back
     ///     along the suit's current heading.
-    ///   - Push the stick left/right (tiltInput.x) = turn (yaw) the suit's
-    ///     heading, AND immediately strafe/slide the suit sideways along that
-    ///     same heading's right vector. Per report ("옆으로가 잘 안감. 옆으로
+    ///   - Push the stick left/right (tiltInput.x) = strafe/slide the suit
+    ///     sideways. (UPDATED: it no longer also turns an invisible heading -
+    ///     see the "앞으로 밀면 옆으로 가고" fix in Update(); the history below
+    ///     is kept for context.) Per report ("옆으로가 잘 안감. 옆으로
     ///     해도 앞으로 하고나서 옆으로 해야 옆으로감. 그냥 옆으로 해도 갈 수
     ///     있게 해야함"): a pure left/right push used to ONLY accumulate
     ///     HeadingYaw (a turn-in-place with zero translation), so nothing
@@ -93,28 +94,47 @@ namespace Gundam.Cockpit
             Vector2 raw = leftStick.tiltInput;
             Vector2 t = new Vector2(ApplyDeadZone(raw.x), ApplyDeadZone(raw.y));
 
-            // Turn (yaw) - the stick's left/right POSITION, since it no longer
-            // rotates/twists in place. Still only ever accumulated into this
-            // float, never applied to transform.rotation.
-            HeadingYaw += t.x * maxTurnSpeed * Time.deltaTime;
+            // Per report ("왼손 조종기로 어느정도 조종을하면 조종이 제대로
+            // 안됨 앞으로 밀면 옆으로 가고 옆으로 밀면 앞으로가고... 처음에만
+            // 멀정하고"): this used to ALSO accumulate HeadingYaw from t.x
+            // (HeadingYaw += t.x * maxTurnSpeed * dt) and then measure
+            // forward/strafe against that rotated heading. But nothing the
+            // pilot can SEE ever rotates with HeadingYaw - this transform's
+            // rotation is deliberately never written (see the class doc
+            // comment - VR motion sickness), so the cockpit, the dome and the
+            // pilot's view all stay facing the same fixed direction forever.
+            // Every left/right push silently turned the invisible movement
+            // basis a bit more (60 deg/s), so after ~1.5s of sideways input
+            // it was 90 deg off: "forward" on the stick moved the suit
+            // sideways on screen and vice versa - fine only at the very
+            // start, before any heading had accumulated. Exactly the report.
+            //
+            // Fix: movement is now measured against this transform's own
+            // fixed forward/right (the same direction the cockpit and the
+            // pilot's view face), so stick forward = screen forward and stick
+            // sideways = screen sideways, always, no matter how long it's
+            // been steered. The stick's left/right no longer turns anything.
+            // (Looking around is the RightJoystick's job now - see
+            // HeadCamManualLook - completely separate from this.) HeadingYaw
+            // is kept as a property so CockpitHUD's HEADING readout still
+            // compiles; it simply stays at 0 now. maxTurnSpeed is kept too
+            // (unused) so no serialized field disappears from the Inspector.
+            Vector3 suitForward = transform.forward;
+            Vector3 suitRight = transform.right;
 
-            Quaternion heading = Quaternion.Euler(0f, HeadingYaw, 0f);
-            Vector3 headingForward = heading * Vector3.forward;
-            Vector3 headingRight = heading * Vector3.right;
-
-            // Forward/back push/pull = forward/back thrust, PLUS left/right
-            // push/pull = an immediate sideways strafe (added per the report
-            // in the class doc comment above) - both measured against the
-            // tracked heading above instead of transform.forward (same result
-            // when nothing else ever rotates this transform, which is
-            // guaranteed - see above). Diagonal input is clamped to length 1
-            // first so pushing the stick to a corner doesn't move faster than
-            // pushing it straight in one axis.
+            // Diagonal input is clamped to length 1 first so pushing the stick
+            // to a corner doesn't move faster than pushing it straight in one
+            // axis.
             Vector2 moveInput = t.sqrMagnitude > 1f ? t.normalized : t;
-            Vector3 planarVelocity = (headingForward * moveInput.y + headingRight * moveInput.x) * maxMoveSpeed;
+            Vector3 planarVelocity = (suitForward * moveInput.y + suitRight * moveInput.x) * maxMoveSpeed;
+            planarVelocity.y = 0f;
 
             CurrentSpeed = planarVelocity.magnitude;
             transform.position += planarVelocity * Time.deltaTime;
+
+            // (The temporary "[ShipMove]" Debug.Log diagnostic that lived here
+            // for the earlier "옆으로 안감" report has been removed - that
+            // report is resolved, and this one's root cause is found above.)
         }
 
         /// <summary>Zeroes out small stick input near center (so hand jitter while

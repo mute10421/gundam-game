@@ -37,6 +37,10 @@ namespace Gundam.Cockpit
         public Text weaponNameText;
         public Text ammoText;
 
+        [Header("Head Vulcan ammo (added per report - \"내 앞에 디스플레이에 표시가 안됨\": RightDisplay's CockpitWeaponHUD already shows this off to the side, this duplicates it directly on FrontDisplay/SysCheck_Center - the screen straight ahead of the pilot - so it's visible without looking away while aiming with the head)")]
+        public HeadVulcanController headVulcan;
+        public Text vulcanAmmoText;
+
         void Update()
         {
             if (infoText != null)
@@ -74,6 +78,18 @@ namespace Gundam.Cockpit
             {
                 if (weaponNameText != null) weaponNameText.text = weapon.CurrentWeaponName;
                 if (ammoText != null) ammoText.text = $"AMMO {weapon.CurrentAmmo:000}/{weapon.CurrentMaxAmmo:000}";
+            }
+
+            if (vulcanAmmoText != null && headVulcan != null)
+            {
+                string stateLabel = headVulcan.State switch
+                {
+                    HeadVulcanController.FireReadyState.Empty => "EMPTY",
+                    HeadVulcanController.FireReadyState.Reloading => "RELOADING",
+                    _ => "READY",
+                };
+                vulcanAmmoText.text = $"{headVulcan.weaponName}  AMMO {headVulcan.CurrentAmmo:00}/{headVulcan.maxAmmo:00}  [{stateLabel}]";
+                vulcanAmmoText.color = GundamVitals.StatusColor(headVulcan.AmmoFraction);
             }
         }
 

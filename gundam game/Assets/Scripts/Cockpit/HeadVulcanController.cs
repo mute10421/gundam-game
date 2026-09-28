@@ -52,8 +52,23 @@ namespace Gundam.Cockpit
         [Header("Bullet")]
         public float bulletSpeed = 80f;
         public float bulletLifetime = 3f;
+        [Tooltip("Bright/emissive material for the placeholder bullet (see SpawnBullet) so tracer fire actually reads at a distance. Falls back to the primitive's default material if left null.")]
+        // Per report ("해드발칸이 발사가 되는지 안보임"): the muzzles sit on
+        // ExternalGundam's own head (~20m from the pilot's own camera - see
+        // PlaceExternalGundam's placement at world Z=20), and the placeholder
+        // bullet was a tiny 0.04-scale, default-material sphere - at that
+        // distance it was essentially an invisible gray speck. bulletMat
+        // (wired by GundamCockpitSetup to a bright emissive orange, matching
+        // this project's other MakeEmissiveMat accents) plus the bigger
+        // bulletScale below fixes that.
+        public Material bulletMat;
+        [Tooltip("Visual scale of the placeholder bullet sphere. Bumped up from an earlier, barely-visible 0.04 for the same reason as bulletMat above.")]
+        public float bulletScale = 0.12f;
         [Tooltip("true: each shot alternates HeadVulcanMuzzle_L / HeadVulcanMuzzle_R. false: both muzzles fire together every shot.")]
-        public bool alternateMuzzles = true;
+        // Per request ("총알 개수는 120발이야 머리 한쪽당 60발씩해서 총 120발이야
+        // 그니까 동시에 양쪽에서 나가는거니까"): both muzzles fire together on
+        // every shot rather than alternating - defaulted to false to match.
+        public bool alternateMuzzles = false;
 
         // --- Ammo/state (ADDED for the Cockpit HUD - RightDisplay's WEAPON
         // screen, per request "Head Vulcan 발사 시 탄약 수가 감소하도록...
@@ -66,9 +81,17 @@ namespace Gundam.Cockpit
         // direction above are untouched. If ammo runs out, the gun keeps
         // firing on every bent-thumb frame exactly as before; only the HUD-
         // facing CurrentAmmo/State values reflect it running dry. ---
+        // Per request ("총알 개수는 120발이야 머리 한쪽당 60발씩해서 총 120발이야
+        // 그니까 동시에 양쪽에서 나가는거니까 60발로 표기하면될듯"): the suit
+        // physically carries 120 rounds total (60 per head muzzle), but since
+        // both muzzles always fire together as one shot (alternateMuzzles =
+        // false above), one shot uses 2 physical rounds (1 per side) - so the
+        // HUD-facing ammo count here tracks SHOTS, not individual rounds, and
+        // maxAmmo = 60 shots x 2 rounds/shot = 120 rounds total, matching the
+        // spec exactly.
         [Header("Ammo / HUD status (does not gate or change firing)")]
         public string weaponName = "HEAD VULCAN";
-        public int maxAmmo = 200;
+        public int maxAmmo = 60;
         [Tooltip("Seconds the HUD shows EMPTY before automatically switching to RELOADING.")]
         public float emptyHoldDuration = 0.4f;
         [Tooltip("Seconds RELOADING lasts before ammo refills to maxAmmo and state returns to READY.")]
@@ -271,9 +294,15 @@ namespace Gundam.Cockpit
                 go = GameObject.CreatePrimitive(PrimitiveType.Sphere);
                 go.name = "HeadVulcanBullet";
                 go.transform.SetPositionAndRotation(muzzle.position, fireRotation);
-                go.transform.localScale = Vector3.one * 0.04f;
+                go.transform.localScale = Vector3.one * bulletScale;
                 Collider col = go.GetComponent<Collider>();
                 if (col != null) Destroy(col);
+
+                if (bulletMat != null)
+                {
+                    Renderer rend = go.GetComponent<Renderer>();
+                    if (rend != null) rend.sharedMaterial = bulletMat;
+                }
             }
 
             Rigidbody rb = go.GetComponent<Rigidbody>();

@@ -32,6 +32,15 @@ Shader "Custom/CockpitDomeCubemap"
     {
         _CubeTex("Live Cubemap (RGB)", CUBE) = "" {}
         _Exposure("Exposure", Range(0.1, 4)) = 1.0
+        // Added for the RightJoystick look feature (see CockpitViewController.cs):
+        // a rotation (quaternion x,y,z,w) applied to the sampling direction, so
+        // the whole dome view can turn. Camera.RenderToCubemap always renders
+        // WORLD-axis-aligned faces and ignores the camera's own rotation, so
+        // rotating HeadCam alone can never turn this dome - the rotation has to
+        // be applied here, where the cubemap is sampled. Default (0,0,0,1) is
+        // the identity rotation, so any scene/material that never sets it looks
+        // exactly like before.
+        _ViewRotQ("View Rotation (quaternion xyzw)", Vector) = (0, 0, 0, 1)
     }
 
     SubShader
@@ -58,6 +67,16 @@ Shader "Custom/CockpitDomeCubemap"
             TEXTURECUBE(_CubeTex);
             SAMPLER(sampler_CubeTex);
             float _Exposure;
+            float4 _ViewRotQ;
+
+            // Rotates v by unit quaternion q (same math as Unity's
+            // Quaternion * Vector3 operator, so a value computed on the C#
+            // side with Quaternion.Euler(...) rotates here identically).
+            float3 RotateByQuat(float3 v, float4 q)
+            {
+                float3 t = 2.0 * cross(q.xyz, v);
+                return v + q.w * t + cross(q.xyz, t);
+            }
 
             struct Attributes
             {
@@ -88,7 +107,11 @@ Shader "Custom/CockpitDomeCubemap"
 
             half4 Frag(Varyings IN) : SV_Target
             {
-                half3 col = SAMPLE_TEXTURECUBE(_CubeTex, sampler_CubeTex, normalize(IN.dirWS)).rgb;
+                // Looking at dome direction d shows the world in direction
+                // (viewRotation * d): e.g. a +30 deg yaw makes the dome's
+                // front show what is 30 deg to the right in the world.
+                float3 dir = RotateByQuat(normalize(IN.dirWS), _ViewRotQ);
+                half3 col = SAMPLE_TEXTURECUBE(_CubeTex, sampler_CubeTex, dir).rgb;
                 return half4(col * _Exposure, 1.0);
             }
             ENDHLSL

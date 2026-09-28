@@ -184,7 +184,7 @@ namespace Gundam.EditorTools
             //     with a reference photo of an anime cockpit HUD ring + trajectory
             //     "gate" markers: "콕핏에 외관에 구형이 있어서 그 구형에 밖에가 보이면서
             //     저런 표식으로 궤도를 알려주는 시스템이 있어야해"). ---
-            BuildOrbitHUD(interior.transform, hudLineMat, hudGateMat);
+            Transform orbitHud = BuildOrbitHUD(interior.transform, hudLineMat, hudGateMat);
 
             // --- Hand trackers (placed under the XR Origin once it is created below) ---
             HandJointTracker leftHand = CreateHandTracker("LeftHandTracker", Handedness.Left);
@@ -358,6 +358,21 @@ namespace Gundam.EditorTools
 
                 Transform domeTransform = interior.transform.Find("Cockpit_Dome");
                 viewController.domeRenderer = domeTransform != null ? domeTransform.GetComponent<Renderer>() : null;
+
+                // Per request ("OrbitHUD_Tick_3 이거 만들어 둔게 적을 포착하면 적
+                // 사이즈로 모여서 줄어들어야해 원형으로 적을 타겟하는거야"): the
+                // OrbitHUD ring becomes a lock-on reticle - see
+                // OrbitHUDTargetLock.cs. Wired here because it needs the pilot's
+                // camera, the view controller and the dome, which all exist by now.
+                if (orbitHud != null)
+                {
+                    OrbitHUDTargetLock ringLock = orbitHud.gameObject.AddComponent<OrbitHUDTargetLock>();
+                    ringLock.pilotCamera = playerViewCamera;
+                    ringLock.viewController = viewController;
+                    ringLock.dome = domeTransform;
+                    ringLock.ringRadius = 1.5f; // BuildOrbitHUD's ringRadius
+                    ringLock.lockedMaterial = MakeEmissiveMat(new Color(0.15f, 0.02f, 0.02f), new Color(1f, 0.2f, 0.15f));
+                }
 
                 Debug.Log("[Gundam] CockpitViewController wired: RightJoystick -> '" +
                     (viewController.viewCamera != null ? viewController.viewCamera.name : "null") + "' camera + " +
@@ -2234,27 +2249,34 @@ namespace Gundam.EditorTools
             CreateSphere(name + "_GripBall", handleGo.transform, Vector3.zero,
                 new Vector3(0.10f, 0.10f, 0.10f), accentMat);
 
-            GameObject thumbButton = CreateSphere(name + "_ThumbButton", handleGo.transform, new Vector3(0f, 0.045f, -0.015f),
-                new Vector3(0.022f, 0.022f, 0.022f), buttonMat);
-
-            // Per-finger buttons curling across the front face of the grip
-            // ball, one under where each of the four fingers naturally
-            // rests when wrapped around it (per request: "손가락별로
-            // 버튼이있어서 사용할거야"). These positions are now only the
-            // starting guess: per request ("버튼 5개를 손가락 끝마디 위치로
-            // 정확히 옮겨줘"), JoystickFingerButtons (added below) re-fits all
-            // 5 onto the ball surface right under the pilot's REAL tracked
-            // fingertip segments shortly after each grab, and turns them into
-            // pressable buttons (the thumb one fires the Head Vulcan on the
-            // right stick).
-            GameObject indexButton = CreateSphere(name + "_IndexButton", handleGo.transform, new Vector3(-0.026f, 0.030f, 0.040f),
-                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            GameObject middleButton = CreateSphere(name + "_MiddleButton", handleGo.transform, new Vector3(-0.009f, 0.014f, 0.049f),
-                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            GameObject ringButton = CreateSphere(name + "_RingButton", handleGo.transform, new Vector3(0.009f, -0.004f, 0.050f),
-                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
-            GameObject pinkyButton = CreateSphere(name + "_PinkyButton", handleGo.transform, new Vector3(0.026f, -0.022f, 0.044f),
-                new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            // --- Finger buttons ON THE GRIP BALL - per request ("네모난 판이
+            //     생김 저거지워 그리고 구체 조종기 유지해 구체 조종기를 잡았을때
+            //     손가락 끝마디에 버튼이 있는거라고"): no finger plate; the ball
+            //     is gripped with a fist as before, and each button sits on the
+            //     ball's surface where that finger's last segment (끝마디) lands
+            //     when the fist is closed around it. Default layout = a hand
+            //     wrapping the ball from the pilot's side: palm on the back/top,
+            //     the four fingertips side by side across the FRONT just below
+            //     the equator (index on the thumb side, pinky lowest), thumb pad
+            //     around the inner side. Mirrored per hand (the right hand's
+            //     thumb side is -X, the left hand's +X). JoystickFingerButtons
+            //     (added below) then moves each one, on the ball surface, to
+            //     exactly under the pilot's REAL tracked fingertip segment a
+            //     moment after each grab, and handles pressing (fingertip pushed
+            //     in toward the ball); the RightJoystick's thumb button fires the
+            //     Head Vulcan. ---
+            float handX = isRight ? 1f : -1f;
+            const float ballRadius = 0.05f;
+            GameObject thumbButton = CreateSphere(name + "_ThumbButton", handleGo.transform,
+                new Vector3(-0.85f * handX, 0.25f, 0.46f).normalized * ballRadius, new Vector3(0.022f, 0.022f, 0.022f), buttonMat);
+            GameObject indexButton = CreateSphere(name + "_IndexButton", handleGo.transform,
+                new Vector3(-0.40f * handX, -0.15f, 0.904f).normalized * ballRadius, new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            GameObject middleButton = CreateSphere(name + "_MiddleButton", handleGo.transform,
+                new Vector3(-0.13f * handX, -0.20f, 0.971f).normalized * ballRadius, new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            GameObject ringButton = CreateSphere(name + "_RingButton", handleGo.transform,
+                new Vector3(0.13f * handX, -0.22f, 0.967f).normalized * ballRadius, new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
+            GameObject pinkyButton = CreateSphere(name + "_PinkyButton", handleGo.transform,
+                new Vector3(0.36f * handX, -0.30f, 0.883f).normalized * ballRadius, new Vector3(0.016f, 0.016f, 0.016f), buttonMat);
 
             if (isRight)
             {
@@ -2290,7 +2312,7 @@ namespace Gundam.EditorTools
                 thumbButton.transform, indexButton.transform, middleButton.transform,
                 ringButton.transform, pinkyButton.transform,
             };
-            fingerButtons.gripRadius = 0.05f; // GripBall above is 0.10 across
+            fingerButtons.gripRadius = ballRadius; // GripBall above is 0.10 across
             fingerButtons.pressedMaterial = MakeEmissiveMat(new Color(0.9f, 0.95f, 0.9f), new Color(1f, 1f, 0.6f));
 
             return lever;

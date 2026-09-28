@@ -74,6 +74,7 @@
     <Compile Include="Assets\Scripts\Cockpit\TargetingHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HitTarget.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\OrbitHUDTargetLock.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadCamManualLook.cs" />
   </ItemGroup>
   <ItemGroup>

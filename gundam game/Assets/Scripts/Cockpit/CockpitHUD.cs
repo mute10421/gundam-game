@@ -103,7 +103,8 @@ namespace Gundam.Cockpit
                     if (btn.lever == null || !btn.lever.isGrabbed) thumb = "THUMB BTN: GRAB R-STICK";
                     else if (!btn.ButtonsFitted) thumb = "THUMB BTN: FITTING...";
                     else thumb = $"THUMB BTN {(btn.ThumbPressed ? "ON" : "--")}  " +
-                        $"{Mathf.RoundToInt(btn.PressAmount(JoystickFingerButtons.Finger.Thumb) * 1000f)}/{Mathf.RoundToInt(btn.pressDepth * 1000f)}mm";
+                        $"{Mathf.RoundToInt(btn.PressAmount(JoystickFingerButtons.Finger.Thumb) * 1000f)}/{Mathf.RoundToInt(btn.pressDepth * 1000f)}mm  " +
+                        $"{Mathf.RoundToInt(btn.CurlAmount(JoystickFingerButtons.Finger.Thumb))}/{Mathf.RoundToInt(btn.pressCurlDegrees)}deg";
                 }
                 else
                 {

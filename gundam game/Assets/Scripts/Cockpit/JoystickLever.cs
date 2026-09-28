@@ -283,6 +283,30 @@ namespace Gundam.Cockpit
         [Range(0.1f, 1f)] public float gripToGrabThreshold = 0.55f;
         [Range(0.05f, 1f)] public float gripToReleaseThreshold = 0.35f;
 
+        // Added per request ("조종기 버튼 위치가 손을 책상에 올려두었을때 손가락
+        // 마디 끝에 있다고 생각하고 두어야해" + the explicit choice "손바닥 올리면
+        // 잡히게"): the pilot now lays the hand FLAT on the controller, palm on
+        // the grip dome and fingertips on the buttons, like a hand resting on a
+        // desk. A flat hand has almost no GripAmount/PinchAmount, so the fist/
+        // pinch check below could never grab it. This adds a second, additive
+        // way to grab: the palm simply resting within palmRestGrabRadius of the
+        // grip (handle) - released once it lifts past palmRestReleaseRadius
+        // (hysteresis, so a slight lift doesn't drop the stick). The existing
+        // fist/pinch grab and the XRI path are unchanged and still work too.
+        //
+        // UPDATE per follow-up ("구체 조종기 유지해 구체 조종기를 잡았을때
+        // 손가락 끝마디에 버튼이 있는거라고"): the flat-hand idea was a
+        // misunderstanding - the controller stays a sphere you GRIP, so the
+        // normal fist/pinch grab is the one in use again. Palm-rest grab is
+        // kept but OFF by default (a hand merely passing near the ball would
+        // otherwise grab it).
+        [Header("Palm-rest grab (optional, off by default)")]
+        public bool allowPalmRestGrab = false;
+        [Tooltip("Palm within this distance (m) of the grip dome's center starts a grab.")]
+        public float palmRestGrabRadius = 0.11f;
+        [Tooltip("While palm-rest grabbed, the grab holds until the palm is farther than this (m) from the grip dome's center.")]
+        public float palmRestReleaseRadius = 0.16f;
+
         [Header("Travel range (meters, +/- around the resting/center position)")]
         [Tooltip("Left/right travel limit, along the pivot's local X axis.")]
         public float lateralRange = 0.08f;
@@ -565,6 +589,7 @@ namespace Gundam.Cockpit
         bool CanGrab(HandJointTracker hand)
         {
             if (hand == null || !hand.IsTracked) return false;
+            if (PalmResting(hand, palmRestGrabRadius)) return true;
             bool gripping = hand.GripAmount >= gripToGrabThreshold;
             bool pinching = hand.PinchAmount >= pinchToGrabThreshold;
             if (!gripping && !pinching) return false;
@@ -574,7 +599,17 @@ namespace Gundam.Cockpit
         bool StillGrabbing(HandJointTracker hand)
         {
             if (hand == null || !hand.IsTracked) return false;
+            if (PalmResting(hand, palmRestReleaseRadius)) return true;
             return hand.GripAmount >= gripToReleaseThreshold || hand.PinchAmount >= pinchToReleaseThreshold;
+        }
+
+        /// <summary>Palm-rest grab check (see allowPalmRestGrab): the palm is within
+        /// 'radius' of the grip dome's center (the handle, which follows the hand
+        /// while held - so this only lets go when the hand actually lifts away).</summary>
+        bool PalmResting(HandJointTracker hand, float radius)
+        {
+            if (!allowPalmRestGrab || handle == null) return false;
+            return Vector3.Distance(hand.PalmPosition, handle.position) <= radius;
         }
 
 #if UNITY_EDITOR

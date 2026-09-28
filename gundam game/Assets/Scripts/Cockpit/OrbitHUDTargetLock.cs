@@ -1,0 +1,313 @@
+using UnityEngine;
+using System.Collections.Generic;
+
+namespace Gundam.Cockpit
+{
+    /// <summary>
+    /// Turns the cockpit's big OrbitHUD ring (the ring of OrbitHUD_Tick_* marks +
+    /// OrbitHUD_Gate markers built by GundamCockpitSetup.BuildOrbitHUD) into a
+    /// lock-on reticle, per request:
+    ///
+    ///   "OrbitHUD_Tick_3 이거 만들어 둔게 적을 포착하면 적 사이즈로 모여서
+    ///    줄어들어야해 원형으로 적을 타겟하는거야"
+    ///
+    /// When an enemy (EnemyMarker - e.g. ZakuEnemy) appears INSIDE the ring as the
+    /// pilot sees it, the whole ring gathers onto the enemy: every tick slides toward
+    /// the enemy's on-screen position and the circle shrinks to the enemy's apparent
+    /// size, the ticks themselves get smaller, and once fully closed the ring turns
+    /// lockedMaterial (red). It keeps following the enemy while it stays captured;
+    /// when the enemy leaves the ring (or is gone) the ring opens back out to its
+    /// original shape.
+    ///
+    /// Where the pilot "sees" the enemy: the pilot never looks at the world directly
+    /// - they're inside the opaque Cockpit_Dome, which shows HeadCam's cubemap,
+    /// sampled by the dome's surface normal and turned by the RightJoystick view
+    /// (CockpitViewController.LookRotation: dome direction d shows world direction
+    /// LookRotation*d). So the enemy's world direction from HeadCam is mapped back to
+    /// the exact point on the (non-uniformly scaled) dome surface that displays it,
+    /// and the ring is placed where the pilot's eye-ray to that point crosses the
+    /// ring's own plane. Apparent size = the enemy's top and side bounds edges
+    /// pushed through that same mapping, so it matches what's actually on the dome.
+    ///
+    /// Only moves/scales/re-materials the ring's own child ticks (restored exactly
+    /// when released). Never touches the enemy, cameras, MobileSuitRoot or the view.
+    /// </summary>
+    public class OrbitHUDTargetLock : MonoBehaviour
+    {
+        [Header("References (wired by GundamCockpitSetup)")]
+        [Tooltip("The pilot's own XR Main Camera (only read).")]
+        public Camera pilotCamera;
+        [Tooltip("RightJoystick view controller - gives HeadCam (the view origin) and the view rotation.")]
+        public CockpitViewController viewController;
+        [Tooltip("Cockpit_Dome (the enclosing screen the outside world is shown on).")]
+        public Transform dome;
+        [Tooltip("Ring color once fully locked. Leave empty to keep the normal colors.")]
+        public Material lockedMaterial;
+
+        [Header("Ring")]
+        [Tooltip("Must match BuildOrbitHUD's ringRadius.")]
+        public float ringRadius = 1.5f;
+        [Tooltip("An enemy must appear within ringRadius x this to be captured.")]
+        public float captureRadiusFactor = 1.0f;
+        [Tooltip("Once locked, the enemy stays locked until it's farther out than ringRadius x this (hysteresis).")]
+        public float releaseRadiusFactor = 1.25f;
+
+        [Header("Lock-on look")]
+        [Tooltip("Seconds for the ring to fully close onto a captured enemy.")]
+        public float lockTime = 0.5f;
+        [Tooltip("Seconds for the ring to open back out after the enemy is lost.")]
+        public float releaseTime = 0.4f;
+        [Tooltip("Locked circle = enemy's apparent size x this (a little room around it).")]
+        public float sizeMargin = 1.1f;
+        [Tooltip("Smallest the locked circle gets (m, on the ring plane).")]
+        public float minLockRadius = 0.08f;
+        [Tooltip("Tick size when fully locked (1 = unchanged).")]
+        [Range(0.1f, 1f)] public float lockedTickScale = 0.5f;
+        [Tooltip("How quickly the locked circle follows the enemy's position/size.")]
+        public float followSharpness = 12f;
+
+        [Header("Detection")]
+        public float maxRange = 500f;
+        [Tooltip("Also lock onto the practice Target cubes (HitTarget), not just enemies (EnemyMarker).")]
+        public bool includeHitTargets = false;
+        public float rescanInterval = 0.5f;
+
+        /// <summary>The currently captured target (null = none).</summary>
+        public Transform CurrentTarget { get; private set; }
+        /// <summary>0 = ring fully open, 1 = fully closed onto the target.</summary>
+        public float LockProgress => _t;
+        public bool IsLocked => _t >= 0.99f && CurrentTarget != null;
+
+        struct Tick
+        {
+            public Transform t;
+            public Vector3 pos;
+            public Vector3 scale;
+            public Vector2 dir;
+            public Renderer[] renderers;
+            public Material[] materials;
+        }
+
+        readonly List<Tick> _ticks = new List<Tick>();
+        readonly List<Transform> _candidates = new List<Transform>();
+        float _rescanTimer;
+        float _t;
+        Vector2 _center;
+        float _radius;
+        bool _haveLockPose;
+        bool _lockedMatOn;
+
+        void Awake()
+        {
+            _ticks.Clear();
+            foreach (Transform child in transform)
+            {
+                Vector3 p = child.localPosition;
+                Vector2 d = new Vector2(p.x, p.y);
+                Renderer[] rs = child.GetComponentsInChildren<Renderer>(true);
+                Material[] ms = new Material[rs.Length];
+                for (int i = 0; i < rs.Length; i++) ms[i] = rs[i].sharedMaterial;
+                _ticks.Add(new Tick
+                {
+                    t = child,
+                    pos = p,
+                    scale = child.localScale,
+                    dir = d.sqrMagnitude > 1e-6f ? d.normalized : Vector2.up,
+                    renderers = rs,
+                    materials = ms,
+                });
+            }
+            _radius = ringRadius;
+        }
+
+        void Update()
+        {
+            _rescanTimer -= Time.deltaTime;
+            if (_rescanTimer <= 0f)
+            {
+                Rescan();
+                _rescanTimer = rescanInterval;
+            }
+
+            // Pick the captured target: keep the current one while it's within the
+            // (looser) release radius, otherwise take whichever enemy appears
+            // closest to the ring's center inside the capture radius.
+            Transform best = null;
+            Vector2 bestCenter = Vector2.zero;
+            float bestRadius = 0f;
+            float bestScore = float.MaxValue;
+            for (int i = 0; i < _candidates.Count; i++)
+            {
+                Transform c = _candidates[i];
+                if (c == null || !c.gameObject.activeInHierarchy) continue;
+                if (!TryProject(c, out Vector2 center, out float radius)) continue;
+                float limit = ringRadius * (c == CurrentTarget ? releaseRadiusFactor : captureRadiusFactor);
+                float off = center.magnitude;
+                if (off > limit) continue;
+                float score = c == CurrentTarget ? off * 0.5f : off; // prefer keeping the current lock
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = c;
+                    bestCenter = center;
+                    bestRadius = radius;
+                }
+            }
+
+            if (best != null)
+            {
+                if (best != CurrentTarget || !_haveLockPose)
+                {
+                    // New target: start the circle from the full ring around its
+                    // own center, then close in - reads as "the ring gathers onto it".
+                    if (CurrentTarget == null && _t <= 0.01f) { _center = Vector2.zero; _radius = ringRadius; }
+                    _haveLockPose = true;
+                }
+                CurrentTarget = best;
+                float f = 1f - Mathf.Exp(-followSharpness * Time.deltaTime);
+                _center = Vector2.Lerp(_center, bestCenter, f);
+                _radius = Mathf.Lerp(_radius, Mathf.Clamp(bestRadius, minLockRadius, ringRadius), f);
+                _t = Mathf.MoveTowards(_t, 1f, Time.deltaTime / Mathf.Max(0.01f, lockTime));
+            }
+            else
+            {
+                CurrentTarget = null;
+                _t = Mathf.MoveTowards(_t, 0f, Time.deltaTime / Mathf.Max(0.01f, releaseTime));
+                if (_t <= 0f) _haveLockPose = false;
+            }
+
+            ApplyRing();
+        }
+
+        void ApplyRing()
+        {
+            float e = _t * _t * (3f - 2f * _t); // smoothstep
+            float tickScale = Mathf.Lerp(1f, lockedTickScale, e);
+            for (int i = 0; i < _ticks.Count; i++)
+            {
+                Tick k = _ticks[i];
+                if (k.t == null) continue;
+                Vector3 locked = new Vector3(_center.x + k.dir.x * _radius, _center.y + k.dir.y * _radius, k.pos.z);
+                k.t.localPosition = Vector3.Lerp(k.pos, locked, e);
+                k.t.localScale = k.scale * tickScale;
+            }
+
+            bool wantLockedMat = lockedMaterial != null && e >= 0.98f;
+            if (wantLockedMat != _lockedMatOn)
+            {
+                _lockedMatOn = wantLockedMat;
+                for (int i = 0; i < _ticks.Count; i++)
+                {
+                    Tick k = _ticks[i];
+                    for (int r = 0; r < k.renderers.Length; r++)
+                    {
+                        if (k.renderers[r] != null) k.renderers[r].sharedMaterial = wantLockedMat ? lockedMaterial : k.materials[r];
+                    }
+                }
+            }
+        }
+
+        /// <summary>Where (ring-local x/y) and how big (ring-plane radius) the target
+        /// looks to the pilot. False if it's behind, out of range, or unprojectable.</summary>
+        bool TryProject(Transform target, out Vector2 center, out float radius)
+        {
+            center = Vector2.zero;
+            radius = 0f;
+            if (pilotCamera == null) return false;
+
+            Bounds b = TargetBounds(target);
+            Vector3 origin = ViewOrigin();
+            Vector3 toTarget = b.center - origin;
+            float dist = toTarget.magnitude;
+            if (dist < 0.5f || dist > maxRange) return false;
+
+            if (!ProjectPoint(b.center, out center)) return false;
+
+            // Apparent size: project the target's top and side edges through the
+            // SAME dome mapping and measure how far they land from its center on
+            // the ring plane - this includes the dome's own stretch, so the locked
+            // circle matches what the pilot actually sees.
+            Vector3 worldDir = toTarget / dist;
+            Vector3 side = Vector3.Cross(Vector3.up, worldDir);
+            if (side.sqrMagnitude < 1e-6f) side = Vector3.right;
+            side.Normalize();
+            float r = 0f;
+            if (ProjectPoint(b.center + Vector3.up * b.extents.y, out Vector2 top)) r = Mathf.Max(r, (top - center).magnitude);
+            if (ProjectPoint(b.center + side * Mathf.Max(b.extents.x, b.extents.z), out Vector2 edge)) r = Mathf.Max(r, (edge - center).magnitude);
+            radius = r * sizeMargin;
+            return true;
+        }
+
+        Vector3 ViewOrigin()
+        {
+            if (viewController != null && viewController.viewCamera != null) return viewController.viewCamera.transform.position;
+            return pilotCamera.transform.position;
+        }
+
+        /// <summary>Where a world point appears to the pilot, in ring-local x/y on the
+        /// ring's plane (see the class comment for the dome mapping).</summary>
+        bool ProjectPoint(Vector3 worldPoint, out Vector2 onPlane)
+        {
+            onPlane = Vector2.zero;
+            Vector3 eye = pilotCamera.transform.position;
+            Quaternion look = viewController != null ? viewController.LookRotation : Quaternion.identity;
+
+            Vector3 toPoint = worldPoint - ViewOrigin();
+            if (toPoint.sqrMagnitude < 1e-6f) return false;
+            // Dome direction that displays this world direction.
+            Vector3 domeDir = Quaternion.Inverse(look) * toPoint.normalized;
+
+            // Point on the dome surface showing it (dome samples by its surface
+            // normal: n_world ~ R * (n_obj / S), so n_obj ~ S * (R^-1 * d)).
+            Vector3 shownPoint;
+            if (dome != null)
+            {
+                Vector3 local = dome.InverseTransformDirection(domeDir);
+                Vector3 nObj = Vector3.Scale(dome.lossyScale, local).normalized;
+                shownPoint = dome.TransformPoint(nObj * 0.5f);
+            }
+            else
+            {
+                shownPoint = eye + domeDir * 5f;
+            }
+
+            // Pilot's eye-ray to that point, crossed with the ring's plane.
+            Vector3 ray = shownPoint - eye;
+            if (ray.sqrMagnitude < 1e-6f) return false;
+            ray.Normalize();
+            Vector3 n = transform.forward;
+            float denom = Vector3.Dot(ray, n);
+            if (denom <= 1e-4f) return false; // looking away from the ring plane
+            float tPlane = Vector3.Dot(transform.position - eye, n) / denom;
+            if (tPlane <= 0f) return false;
+            Vector3 hl = transform.InverseTransformPoint(eye + ray * tPlane);
+            onPlane = new Vector2(hl.x, hl.y);
+            return true;
+        }
+
+        static Bounds TargetBounds(Transform target)
+        {
+            Renderer[] rs = target.GetComponentsInChildren<Renderer>();
+            if (rs.Length == 0) return new Bounds(target.position, Vector3.one);
+            Bounds b = rs[0].bounds;
+            for (int i = 1; i < rs.Length; i++) b.Encapsulate(rs[i].bounds);
+            return b;
+        }
+
+        void Rescan()
+        {
+            _candidates.Clear();
+            foreach (EnemyMarker e in FindObjectsByType<EnemyMarker>(FindObjectsInactive.Exclude))
+            {
+                _candidates.Add(e.transform);
+            }
+            if (includeHitTargets)
+            {
+                foreach (HitTarget h in FindObjectsByType<HitTarget>(FindObjectsInactive.Exclude))
+                {
+                    _candidates.Add(h.transform);
+                }
+            }
+        }
+    }
+}

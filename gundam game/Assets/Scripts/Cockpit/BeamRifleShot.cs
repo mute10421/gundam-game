@@ -19,6 +19,8 @@ namespace Gundam.Cockpit
         public float lifetime = 4f;
         public Material flashMaterial;
         public float flashSize = 6f;
+        [Tooltip("This enemy can't be hit by this bolt (an unlocked shot sent past it).")]
+        public EnemyHealth ignore;
 
         float _age;
         readonly RaycastHit[] _hits = new RaycastHit[16];
@@ -39,6 +41,7 @@ namespace Gundam.Cockpit
                 Collider c = _hits[i].collider;
                 if (c == null) continue;
                 EnemyHealth hp = c.GetComponentInParent<EnemyHealth>();
+                if (hp != null && hp == ignore) continue;
                 bool hittable = (hp != null && !hp.IsDead) || c.GetComponentInParent<HitTarget>() != null;
                 if (!hittable) continue;
                 if (_hits[i].distance < best) { best = _hits[i].distance; bestI = i; }

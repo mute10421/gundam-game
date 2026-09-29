@@ -46,6 +46,7 @@ namespace Gundam.EditorTools
         // own Gundam rather than needing its own separately-tuned number.
         const float MobileSuitTargetHeight = 18f;
         // ZakuEnemy's starting Z (ExternalGundam stands at Z=20 -> 80m apart).
+        const float ShipTopSpeed = 40f; // m/s at full LeftJoystick push (was 8)
         const float ZakuSpawnZ = 100f;
 
         // An unnamed layer index used ONLY to hide ExternalGundam's own body
@@ -103,6 +104,11 @@ namespace Gundam.EditorTools
 
             GameObject suitRoot = new GameObject("MobileSuitRoot");
             ShipMovementController ship = suitRoot.AddComponent<ShipMovementController>();
+            // Per "건담에 스피드를 더 빠르게 해줘 어느정도 미는정도에 따라서": top speed
+            // 8 -> 40 m/s. ShipMovementController itself is unchanged - it already
+            // scales speed linearly with how far LeftJoystick is pushed (after its
+            // dead zone), so a light push is still slow and a full push is 40 m/s.
+            ship.maxMoveSpeed = ShipTopSpeed;
 
             // Shared vitals data for the 3-display Cockpit HUD (FrontDisplay's
             // status badge + LeftDisplay's gauges both read the same
@@ -171,6 +177,18 @@ namespace Gundam.EditorTools
 
             // --- Enemy Zaku - per request ("자쿠를 적으로 배치해줘") ---
             // Passed the player's Gundam so its ZakuCombatAI knows what to face/circle.
+            // Player hit points (per "건담에 체력은 3000이고") - on the Gundam body the
+            // Zakus shoot at, feeding the cockpit's shared vitals (HP gauges).
+            PlayerHealth playerHealth = null;
+            if (gundamResult != null && gundamResult.instance != null)
+            {
+                playerHealth = gundamResult.instance.AddComponent<PlayerHealth>();
+                playerHealth.maxHealth = 3000;
+                playerHealth.hudManager = hudManager;
+                playerHealth.capsuleTop = MobileSuitTargetHeight - 1f;
+                hudManager.Vitals.MaxHP = 3000f;
+                hudManager.Vitals.HP = 3000f;
+            }
             PlaceZakuEnemy(gundamResult != null && gundamResult.instance != null ? gundamResult.instance.transform : null);
 
             // --- Full 360-degree solid enclosure (floor + an inward-facing
@@ -1520,6 +1538,8 @@ namespace Gundam.EditorTools
             rc.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
             rc.fireButtons = rightStick != null ? rightStick.GetComponent<JoystickFingerButtons>() : null;
             rc.damage = 500;
+            rc.maxShots = 15;
+            rc.rechargeTime = 5f; // per "재장전 5초로 변경하자"
             rc.shotGlowMaterial = MakeEmissiveMat(new Color(1f, 0.3f, 0.65f), new Color(3.2f, 0.7f, 1.8f));
             rc.shotCoreMaterial = MakeEmissiveMat(new Color(1f, 0.92f, 0.97f), new Color(4f, 3f, 3.6f));
             rc.weaponHUD = interior.GetComponentInChildren<CockpitWeaponHUD>(true);
@@ -1680,7 +1700,24 @@ namespace Gundam.EditorTools
             Debug.Log("[Gundam] Placed " + spots.Length + " distant wreck pieces from " + models.Length + " model(s) in " + DebrisModelFolder + ".");
         }
 
+        // Per "자쿠 ... 3마리정도 나오게 해줘 다른 곳에": three Zakus, each starting in
+        // a different direction/distance around the Gundam (which stands at Z=20):
+        // straight ahead, front-left, and off to the right - so the pilot has to
+        // look around. Each gets its own health/AI; ZakuCombatAI keeps them apart.
+        static readonly Vector3[] ZakuSpawnPoints =
+        {
+            new Vector3(0f, 0f, ZakuSpawnZ),   // ahead, 80 m
+            new Vector3(-85f, 0f, 75f),        // front-left, ~100 m
+            new Vector3(95f, 0f, -10f),        // right, ~100 m
+        };
+
         static void PlaceZakuEnemy(Transform playerGundam)
+        {
+            for (int i = 0; i < ZakuSpawnPoints.Length; i++)
+                PlaceZakuEnemy(playerGundam, i == 0 ? "ZakuEnemy" : "ZakuEnemy_" + (i + 1), ZakuSpawnPoints[i]);
+        }
+
+        static void PlaceZakuEnemy(Transform playerGundam, string zakuName, Vector3 spawn)
         {
             GameObject fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuModelPath);
             if (fbxAsset == null)
@@ -1692,7 +1729,7 @@ namespace Gundam.EditorTools
             }
 
             GameObject instance = (GameObject)PrefabUtility.InstantiatePrefab(fbxAsset);
-            instance.name = "ZakuEnemy";
+            instance.name = zakuName;
             instance.transform.SetParent(null); // world space, same as ExternalGundam - not part of the player's own suit
 
             // Beyond ExternalGundam (which stands at Z=20) so the two read
@@ -1703,8 +1740,11 @@ namespace Gundam.EditorTools
             // Moved from Z=40 (only 20m from ExternalGundam) to Z=100 - per
             // "시작할떄 조금 거리가 있어야할거같아": starts 80m away, then
             // ZakuCombatAI closes to its ~60m engagement distance.
-            instance.transform.position = new Vector3(0f, 0f, ZakuSpawnZ);
-            instance.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+            instance.transform.position = spawn;
+            // Facing the player's Gundam from wherever it starts.
+            Vector3 face = (playerGundam != null ? playerGundam.position : new Vector3(0f, 0f, 20f)) - spawn;
+            face.y = 0f;
+            instance.transform.rotation = face.sqrMagnitude > 0.01f ? Quaternion.LookRotation(face, Vector3.up) : Quaternion.Euler(0f, 180f, 0f);
 
             // Scaled from the model's OWN actual imported bounds (whatever
             // raw scale this particular FBX ships at) to the same ~18m
@@ -1727,7 +1767,7 @@ namespace Gundam.EditorTools
             }
 
             Texture2D zakuTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuTexturePath);
-            ApplyBaseColorTexture(instance, zakuTexture, "ZakuEnemy");
+            ApplyBaseColorTexture(instance, zakuTexture, zakuName);
 
             // Enemy tag (see Gundam.Cockpit.EnemyMarker - OrbitHUDTargetLock uses it).
             instance.AddComponent<EnemyMarker>();
@@ -1757,9 +1797,94 @@ namespace Gundam.EditorTools
             ai.target = playerGundam;
             ai.preferredDistance = 60f;
 
-            Debug.Log("[Gundam] Placed ZakuEnemy at " + instance.transform.position +
+            // Machine gun in the right hand (per "자쿠의 머신건 ... 자쿠손에 들려주고
+            // 사격을 하게 해줘").
+            AddZakuMachineGun(instance, playerGundam);
+
+            Debug.Log("[Gundam] Placed " + zakuName + " at " + instance.transform.position +
                 " (facing the player's Gundam)" +
                 (zakuTexture != null ? ", base color texture applied." : ", no texture found (flat default material)."));
+        }
+
+        // ---------------------------------------------------------------
+        // Zaku machine gun - per "자쿠의 머신건을 다운로드 했어 이거를 자쿠손에
+        // 들려주고 사격을 하게 해줘 자쿠 머신건에 데미지는 50이야 탄환은 100발이야
+        // 재장전속도는 5초야 분당 280발에 속도로 총알이 나가". The downloaded model
+        // (copied to ZakuGunModelPath) in its own default orientation already lies
+        // with the muzzle toward +Z and the drum magazine on top (+Y); points below
+        // are in that frame (model units, ~1 long) and scaled by ZakuGunScale.
+        // ---------------------------------------------------------------
+        const string ZakuGunModelPath = "Assets/Models/ZakuMachineGun/ZakuMachineGun.fbx";
+        const string ZakuGunTexturePath = "Assets/Models/ZakuMachineGun/ZakuMachineGun-baseColor.png";
+        const float ZakuGunScale = 9f; // ~9 m gun for the 18 m Zaku
+        static readonly Vector3 ZakuGunModelGrip = new Vector3(0f, -0.113f, -0.170f);
+        static readonly Vector3 ZakuGunModelMuzzle = new Vector3(0f, -0.015f, 0.499f);
+        static readonly Vector3 ZakuGunGripThumb = new Vector3(0f, 1f, 0.45f); // pistol grip raked back
+        // Grip point inside the Zaku's closed right fist, in RightHand bone axes,
+        // model (unscaled) units - measured from the Zaku's fist mesh.
+        static readonly Vector3 ZakuFistGripUnscaled = new Vector3(-0.005f, 0.0045f, 0.048f);
+
+        static void AddZakuMachineGun(GameObject zaku, Transform playerGundam)
+        {
+            Transform upper = FindDeepChild(zaku.transform, "RightArm");
+            Transform fore = FindDeepChild(zaku.transform, "RightForeArm");
+            Transform hand = FindDeepChild(zaku.transform, "RightHand");
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuGunModelPath);
+            if (upper == null || fore == null || hand == null || asset == null)
+            {
+                Debug.LogWarning("[Gundam] " + zaku.name + ": machine gun not added (" +
+                    (asset == null ? "model missing at " + ZakuGunModelPath : "right arm bones not found") + ").");
+                return;
+            }
+
+            // Gun holder: +Z muzzle, +Y top, 1 unit = 1 m. Child of the Zaku so
+            // EnemyHealth hides it with the body when destroyed.
+            GameObject holder = new GameObject("ZakuMachineGun");
+            holder.transform.SetParent(zaku.transform, false);
+            float ls = zaku.transform.lossyScale.x > 0.0001f ? 1f / zaku.transform.lossyScale.x : 1f;
+            holder.transform.localScale = Vector3.one * ls;
+            GameObject model = (GameObject)PrefabUtility.InstantiatePrefab(asset);
+            model.name = "ZakuMachineGun_Model";
+            Quaternion defaultRot = model.transform.localRotation; // the FBX's own orientation (muzzle +Z)
+            model.transform.SetParent(holder.transform, false);
+            model.transform.localPosition = Vector3.zero;
+            model.transform.localRotation = defaultRot;
+            model.transform.localScale = Vector3.one * ZakuGunScale;
+            Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuGunTexturePath);
+            Material mat = MakeMat(Color.white);
+            mat.name = "ZakuMachineGun";
+            if (tex != null) mat.mainTexture = tex;
+            foreach (Renderer r in model.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            foreach (Collider c in model.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            SetLayerRecursively(holder, 0);
+
+            ZakuMachineGun mg = zaku.AddComponent<ZakuMachineGun>();
+            mg.upperArm = upper;
+            mg.foreArm = fore;
+            mg.hand = hand;
+            mg.gun = holder.transform;
+            mg.gripPoint = ZakuGunModelGrip * ZakuGunScale;
+            mg.muzzlePoint = ZakuGunModelMuzzle * ZakuGunScale;
+            Vector3 thumb = ZakuGunGripThumb.normalized;
+            mg.gripThumb = thumb;
+            mg.gripFingers = Vector3.ProjectOnPlane(Vector3.forward, thumb).normalized;
+            mg.fistGrip = ZakuFistGripUnscaled * hand.lossyScale.x;
+            mg.target = playerGundam != null ? playerGundam.GetComponent<PlayerHealth>() : null;
+            mg.aimHeight = MobileSuitTargetHeight * 0.6f;
+            mg.damage = 50;
+            mg.magazine = 100;
+            mg.reloadTime = 5f;
+            mg.roundsPerMinute = 280f;
+            mg.tracerMaterial = MakeEmissiveMat(new Color(1f, 0.75f, 0.3f), new Color(3f, 1.8f, 0.5f));
+            mg.flashMaterial = MakeEmissiveMat(new Color(1f, 0.8f, 0.4f), new Color(3.5f, 2.2f, 0.8f));
+            Debug.Log("[Gundam] " + zaku.name + ": machine gun in " + hand.name + " (" + ZakuGunScale + " m, 50 dmg, 100 rds, 280 rpm, 5 s reload)" +
+                (mg.target != null ? "." : " - NO PlayerHealth target found."));
         }
 
         // Applies a base color/albedo texture to every material used by

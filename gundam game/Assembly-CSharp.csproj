@@ -74,8 +74,10 @@
     <Compile Include="Assets\Scripts\Cockpit\BeamSaberArmController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitStatusHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalThrustController.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\ZakuBullet.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitWeaponHUD.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\PlayerHealth.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyMarker.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponModeController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanController.cs" />
@@ -88,6 +90,7 @@
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponTouchPanel.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ZakuCombatAI.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\ZakuMachineGun.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpaceDustField.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyHealth.cs" />
     <Compile Include="Assets\Scripts\Cockpit\OrbitHUDTargetLock.cs" />

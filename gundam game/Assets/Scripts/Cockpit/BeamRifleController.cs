@@ -25,9 +25,16 @@ namespace Gundam.Cockpit
     /// target (BeamRifleShot, damage 500).
     ///
     /// Energy (per "빔라이플은 15발이고 재장전까지 쿨타임은 1분이야 충전식이거든"):
-    /// 15 shots; when the last one is fired the rifle RECHARGES for 60 s and then
-    /// is full again. Recharging keeps running even while another weapon is
+    /// 15 shots; when the last one is fired the rifle RECHARGES for 5 s (was 60 s,
+    /// per "재장전 5초로 변경하자") and then is full again. Recharging keeps running even while another weapon is
     /// selected.
+    ///
+    /// Lock-on (per "빔라이플을 들고있을때 락온이 되는 속도를 줄여줘 락온전에 쏘면
+    /// 빗나가게"): while the rifle is out the OrbitHUD ring takes rifleLockTime
+    /// (instead of its normal lockTime) to lock, and a bolt fired BEFORE the lock
+    /// completes misses on purpose - it's sent past the target being acquired
+    /// (and can't damage it), or scattered a few degrees if nothing is being
+    /// acquired. Only a completed lock hits.
     ///
     /// Runs after BeamSaberArmController (which resets the right arm to rest every
     /// frame) so the rifle pose wins while this mode is active; blends in/out.
@@ -84,7 +91,7 @@ namespace Gundam.Cockpit
         [Tooltip("Shots per full charge.")]
         public int maxShots = 15;
         [Tooltip("Seconds to recharge once the rifle is empty.")]
-        public float rechargeTime = 60f;
+        public float rechargeTime = 5f;
         public float shotSpeed = 350f;
         public float shotLength = 14f;
         public float shotRadius = 0.35f;
@@ -92,6 +99,12 @@ namespace Gundam.Cockpit
         public Material shotGlowMaterial;
         public Material shotCoreMaterial;
         public float muzzleFlashSize = 2.5f;
+
+        [Header("Lock-on while the rifle is out")]
+        [Tooltip("Seconds the OrbitHUD ring needs to lock while BEAM RIFLE is active (its own lockTime is restored afterwards).")]
+        public float rifleLockTime = 2f;
+        [Tooltip("Unlocked shots scatter this many degrees (min..max) off the barrel.")]
+        public Vector2 unlockedSpread = new Vector2(2.5f, 6f);
 
         [Header("WEAPON screen (optional)")]
         public CockpitWeaponHUD weaponHUD;
@@ -103,6 +116,7 @@ namespace Gundam.Cockpit
         public float RechargeRemaining => Recharging ? Mathf.Max(0f, _rechargeEnd - Time.time) : 0f;
         public bool Ready => !Recharging && ShotsLeft > 0 && Time.time - LastFireTime >= fireCooldown;
         float _rechargeEnd;
+        float _savedLockTime = -1f;
 
         struct Arm
         {
@@ -177,6 +191,19 @@ namespace Gundam.Cockpit
             Init();
             Active = on;
             _haveAim = false;
+            if (targetLock != null)
+            {
+                if (on)
+                {
+                    if (_savedLockTime < 0f) _savedLockTime = targetLock.lockTime;
+                    targetLock.lockTime = rifleLockTime;
+                }
+                else if (_savedLockTime >= 0f)
+                {
+                    targetLock.lockTime = _savedLockTime;
+                    _savedLockTime = -1f;
+                }
+            }
             if (on) SetVisuals(true);
         }
 
@@ -320,6 +347,15 @@ namespace Gundam.Cockpit
             return t;
         }
 
+        static Bounds TargetBounds(Transform t)
+        {
+            Renderer[] rs = t.GetComponentsInChildren<Renderer>();
+            if (rs.Length == 0) return new Bounds(t.position, Vector3.one * 5f);
+            Bounds b = rs[0].bounds;
+            for (int i = 1; i < rs.Length; i++) b.Encapsulate(rs[i].bounds);
+            return b;
+        }
+
         static Vector3 AimPoint(Transform t)
         {
             Renderer[] rs = t.GetComponentsInChildren<Renderer>();
@@ -340,7 +376,30 @@ namespace Gundam.Cockpit
             }
             Vector3 muzzle = rifle.TransformPoint(muzzlePoint);
             Vector3 dir = rifle.forward;
-            if (tgt != null)
+            EnemyHealth ignore = null;
+            if (tgt == null)
+            {
+                // Not locked yet -> deliberate miss.
+                Transform acquiring = targetLock != null ? targetLock.CurrentTarget : null;
+                EnemyHealth acqHp = acquiring != null ? acquiring.GetComponent<EnemyHealth>() : null;
+                if (acquiring != null && acquiring.gameObject.activeInHierarchy && (acqHp == null || !acqHp.IsDead))
+                {
+                    Bounds b = TargetBounds(acquiring);
+                    Vector3 to = b.center - muzzle;
+                    Vector3 side = Vector3.ProjectOnPlane(Random.onUnitSphere, to.normalized);
+                    if (side.sqrMagnitude < 1e-4f) side = rifle.right;
+                    Vector3 missPoint = b.center + side.normalized * (b.extents.magnitude * 1.2f + 4f);
+                    dir = (missPoint - muzzle).normalized;
+                    ignore = acqHp;
+                }
+                else
+                {
+                    float ang = Random.Range(unlockedSpread.x, unlockedSpread.y);
+                    Vector3 axis = Quaternion.AngleAxis(Random.Range(0f, 360f), rifle.forward) * rifle.right;
+                    dir = Quaternion.AngleAxis(ang, axis) * rifle.forward;
+                }
+            }
+            else
             {
                 // Straight at the locked target - unless it's outside where the
                 // rifle can point (then the bolt just goes where the barrel points).
@@ -360,6 +419,7 @@ namespace Gundam.Cockpit
             s.damage = damage;
             s.hitRadius = shotHitRadius;
             s.flashMaterial = shotGlowMaterial;
+            s.ignore = ignore;
 
             // Muzzle flash.
             GameObject flash = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -394,8 +454,13 @@ namespace Gundam.Cockpit
             if (!Active || weaponHUD == null) return;
             if (weaponHUD.nameText != null) weaponHUD.nameText.text = "BEAM RIFLE";
             if (weaponHUD.ammoText != null)
-                weaponHUD.ammoText.text = "ENERGY " + ShotsLeft.ToString("00") + "/" + maxShots.ToString("00") +
-                    (LockedTarget() != null ? "  LOCK" : "");
+            {
+                string lockTxt = "";
+                if (LockedTarget() != null) lockTxt = "  LOCK";
+                else if (targetLock != null && targetLock.CurrentTarget != null)
+                    lockTxt = "  LOCKING " + Mathf.RoundToInt(targetLock.LockProgress * 100f) + "%";
+                weaponHUD.ammoText.text = "ENERGY " + ShotsLeft.ToString("00") + "/" + maxShots.ToString("00") + lockTxt;
+            }
             float fill = Recharging
                 ? 1f - RechargeRemaining / Mathf.Max(0.01f, rechargeTime)
                 : (maxShots > 0 ? (float)ShotsLeft / maxShots : 0f);

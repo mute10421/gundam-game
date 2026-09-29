@@ -16,6 +16,18 @@ namespace Gundam.Cockpit
     /// bob - all proportional to speed, fading to a light idle sway when still.
     /// Every bone is reset to its rest pose each frame first, so nothing drifts.
     ///
+    /// SMOOTHER MOTION (per "자쿠에 움직임을 조금더 자연스럽게 해주고 3마리정도"):
+    ///   * velocity eases in/out (critically damped, velocitySmoothTime) instead
+    ///     of changing at a fixed rate, and a sidestep reversal slows through a
+    ///     stop instead of flipping;
+    ///   * a slow per-Zaku noise (wander) varies strafe/approach speed so no two
+    ///     Zakus - and no two passes - move identically;
+    ///   * several Zakus keep apart (separationRadius) instead of stacking up;
+    ///   * the body turns with a damped turn and leans its heading a little into
+    ///     the direction it's moving, while the torso and head twist back to
+    ///     keep watching the Gundam;
+    ///   * the walk adds a hip roll / weight shift with each step.
+    ///
     /// Only moves/poses its OWN transform and bones - never the player's suit,
     /// cameras or XR rig. Stops while EnemyHealth reports it destroyed and
     /// resets its velocity when it respawns.
@@ -65,6 +77,27 @@ namespace Gundam.Cockpit
         [Range(0f, 1f)] public float dashChance = 0.25f;
         public float dashMultiplier = 1.8f;
 
+        [Header("Natural motion")]
+        [Tooltip("Time (s) velocity takes to settle on a new maneuver - higher = heavier, smoother.")]
+        public float velocitySmoothTime = 0.8f;
+        [Tooltip("Seconds a sidestep takes to reverse direction (passes through a stop).")]
+        public float strafeReverseTime = 1.2f;
+        [Tooltip("Random speed variation (0..1 of the base speeds).")]
+        [Range(0f, 1f)] public float wanderAmount = 0.35f;
+        public float wanderFrequency = 0.22f;
+        [Tooltip("Other Zakus closer than this (m) push this one away.")]
+        public float separationRadius = 40f;
+        public float separationStrength = 12f;
+        [Tooltip("Damped turn time (s) toward the target.")]
+        public float turnSmoothTime = 0.45f;
+        [Tooltip("How far (deg) the heading leans into a full-speed sidestep.")]
+        public float headingLeadDegrees = 25f;
+        [Tooltip("Share of that lean the torso twists back toward the target.")]
+        [Range(0f, 1f)] public float torsoCounterTwist = 0.7f;
+        public float hipRollDegrees = 4f;
+        [Tooltip("Head keeps looking at the target (up to this many degrees off the body).")]
+        public float headTrackDegrees = 45f;
+
         [Header("Procedural walk")]
         public bool animateBody = true;
         [Tooltip("Metres covered per step.")]
@@ -88,8 +121,16 @@ namespace Gundam.Cockpit
         float _speedMul = 1f;
         float _approachMul = 1f;
         float _findTimer;
+        float _strafeCur;
+        Vector3 _velRef;
+        float _yawVel;
+        float _lead;
+        float _seed;
+        static readonly System.Collections.Generic.List<ZakuCombatAI> s_all = new System.Collections.Generic.List<ZakuCombatAI>();
 
         // Bones (all optional - missing ones are just skipped).
+        Transform _head;
+        Quaternion _headRest;
         Transform _hips, _spine, _lUpLeg, _lLeg, _rUpLeg, _rLeg, _lArm, _lForeArm, _rArm, _rForeArm;
         Transform[] _bones;
         Quaternion[] _rest;
@@ -112,6 +153,9 @@ namespace Gundam.Cockpit
             _lForeArm = FindBone("LeftForeArm");
             _rArm = FindBone("RightArm");
             _rForeArm = FindBone("RightForeArm");
+            _head = FindBone("Head");
+            if (_head != null) _headRest = _head.localRotation;
+            _seed = Random.Range(0f, 1000f);
 
             // Parent-before-child order, so each child's world rotation already
             // includes its parent's offset when it's applied.
@@ -121,10 +165,12 @@ namespace Gundam.Cockpit
             if (_hips != null) _hipsRestLocalPos = _hips.localPosition;
 
             PickManeuver();
+            _maneuverTimer *= Random.Range(0.3f, 1f); // stagger several Zakus
         }
 
         void OnEnable()
         {
+            if (!s_all.Contains(this)) s_all.Add(this);
             if (_health == null) _health = GetComponent<EnemyHealth>();
             if (_health != null)
             {
@@ -135,6 +181,7 @@ namespace Gundam.Cockpit
 
         void OnDisable()
         {
+            s_all.Remove(this);
             if (_health != null)
             {
                 _health.Respawned -= OnRespawned;
@@ -145,6 +192,8 @@ namespace Gundam.Cockpit
         void OnRespawned(EnemyHealth h)
         {
             Velocity = Vector3.zero;
+            _velRef = Vector3.zero;
+            _strafeCur = 0f;
             _phase = 0f;
             PickManeuver();
         }
@@ -186,11 +235,26 @@ namespace Gundam.Cockpit
             Vector3 tangent = Vector3.Cross(Vector3.up, radial); // Zaku's own right when facing the target
 
             float wanted = Mathf.Max(minDistance, varyDistance ? CurrentPreferredDistance : preferredDistance);
-            float approach = Mathf.Clamp((dist - wanted) / Mathf.Max(0.1f, distanceTolerance), -1f, 1f) * approachSpeed * _approachMul;
+            // Smooth (not linear-clamped) approach: eases off as it nears the wanted range.
+            float err = (dist - wanted) / Mathf.Max(0.1f, distanceTolerance);
+            float approach = (float)System.Math.Tanh(err) * approachSpeed * _approachMul;
             if (dist < minDistance) approach = -approachSpeed * 1.5f; // too close - back off hard
-            Vector3 desired = tangent * (_strafeDir * strafeSpeed * _speedMul) + radial * approach;
 
-            Velocity = Vector3.MoveTowards(Velocity, desired, acceleration * dt);
+            // Sidestep: eases through a stop when reversing.
+            float strafeTarget = _strafeDir * _speedMul;
+            _strafeCur = Mathf.MoveTowards(_strafeCur, strafeTarget, dt * 2f / Mathf.Max(0.05f, strafeReverseTime));
+
+            // Slow individual wander on both axes.
+            float t = Time.time * wanderFrequency;
+            float wStrafe = (Mathf.PerlinNoise(_seed, t) - 0.5f) * 2f * wanderAmount;
+            float wApproach = (Mathf.PerlinNoise(_seed + 37.1f, t * 0.8f) - 0.5f) * 2f * wanderAmount;
+
+            Vector3 desired = tangent * ((_strafeCur + wStrafe) * strafeSpeed)
+                            + radial * (approach + wApproach * approachSpeed * 0.5f)
+                            + Separation();
+            desired.y = 0f;
+
+            Velocity = Vector3.SmoothDamp(Velocity, desired, ref _velRef, Mathf.Max(0.05f, velocitySmoothTime));
 
             Vector3 p = transform.position + Velocity * dt;
             p.y = _groundY;
@@ -198,8 +262,33 @@ namespace Gundam.Cockpit
 
             if (dist > 0.01f)
             {
-                transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(radial, Vector3.up), turnSpeed * dt);
+                // Heading: toward the target, leaning a little into a sidestep.
+                float lateral = Vector3.Dot(Velocity, tangent) / Mathf.Max(0.1f, strafeSpeed);
+                _lead = Mathf.Lerp(_lead, Mathf.Clamp(lateral, -1f, 1f) * headingLeadDegrees, 1f - Mathf.Exp(-dt * 3f));
+                float wantYaw = Mathf.Atan2(radial.x, radial.z) * Mathf.Rad2Deg + _lead;
+                float yaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, wantYaw, ref _yawVel,
+                    Mathf.Max(0.05f, turnSmoothTime), Mathf.Max(1f, turnSpeed * 2f));
+                transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
+        }
+
+        /// <summary>Push away from other Zakus that are too close.</summary>
+        Vector3 Separation()
+        {
+            Vector3 push = Vector3.zero;
+            for (int i = 0; i < s_all.Count; i++)
+            {
+                ZakuCombatAI o = s_all[i];
+                if (o == null || o == this) continue;
+                if (o._health != null && o._health.IsDead) continue;
+                Vector3 d = transform.position - o.transform.position;
+                d.y = 0f;
+                float m = d.magnitude;
+                if (m >= separationRadius) continue;
+                Vector3 dir = m > 0.01f ? d / m : Quaternion.Euler(0f, _seed, 0f) * Vector3.forward;
+                push += dir * separationStrength * (1f - m / separationRadius);
+            }
+            return push;
         }
 
         void PickManeuver()
@@ -277,8 +366,12 @@ namespace Gundam.Cockpit
             Rotate(_lForeArm, -elbow, bodyRight);
             Rotate(_rForeArm, -elbow, bodyRight);
 
-            float idleSway = Mathf.Sin(Time.time * 1.3f) * 1.2f * (1f - amount);
+            float idleSway = Mathf.Sin(Time.time * 1.3f + _seed) * 1.2f * (1f - amount);
             Rotate(_spine, torsoLeanDegrees * amount + idleSway, swingAxis);
+            // Torso twists back toward the target against the heading lean.
+            Rotate(_spine, -_lead * torsoCounterTwist, Vector3.up);
+            // Weight shift: hips roll toward the planted foot.
+            Rotate(_hips, hipRollDegrees * amount * s, transform.forward);
             // Hit flinch: torso jolts back, away from the target it's facing.
             Rotate(_spine, -hitFlinchDegrees * _flinch, bodyRight);
 
@@ -286,6 +379,24 @@ namespace Gundam.Cockpit
             {
                 float bob = hipBob * amount * Mathf.Abs(c) - hipBob * amount * 0.5f;
                 _hips.localPosition = _hipsRestLocalPos + _hips.parent.InverseTransformVector(Vector3.up * bob);
+            }
+
+            // Head keeps watching the target (yaw only, limited).
+            if (_head != null)
+            {
+                _head.localRotation = _headRest;
+                if (target != null)
+                {
+                    Vector3 to = target.position - _head.position;
+                    to.y = 0f;
+                    Vector3 fwd = transform.forward;
+                    fwd.y = 0f;
+                    if (to.sqrMagnitude > 0.01f && fwd.sqrMagnitude > 0.01f)
+                    {
+                        float a = Mathf.Clamp(Vector3.SignedAngle(fwd, to, Vector3.up) + _lead * torsoCounterTwist, -headTrackDegrees, headTrackDegrees);
+                        Rotate(_head, a, Vector3.up); // what the spine's counter-twist left over
+                    }
+                }
             }
         }
 

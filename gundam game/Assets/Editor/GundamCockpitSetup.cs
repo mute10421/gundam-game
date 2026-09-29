@@ -393,6 +393,19 @@ namespace Gundam.EditorTools
                 // yaw - see ShipMovementController.Update().
                 ship.viewController = viewController;
 
+                // Per "건담이 내가 바라보는 방향으로 항상 몸이 돌아야함": the Gundam body
+                // turns (yaw) to face the view direction, pivoting about its head so
+                // HeadCam - and so the pilot's view - never shifts. See
+                // ExternalGundamFollower.
+                ExternalGundamFollower bodyTurn = gundamResult.instance != null
+                    ? gundamResult.instance.GetComponent<ExternalGundamFollower>() : null;
+                if (bodyTurn != null)
+                {
+                    bodyTurn.viewController = viewController;
+                    bodyTurn.turnPivot = gundamResult.headCam360.head;
+                    bodyTurn.faceViewDirection = true;
+                }
+
                 Transform domeTransform = interior.transform.Find("Cockpit_Dome");
                 viewController.domeRenderer = domeTransform != null ? domeTransform.GetComponent<Renderer>() : null;
 
@@ -1021,6 +1034,10 @@ namespace Gundam.EditorTools
             modes.rightStickDrivesSaber = true;
             modes.aim = suitRoot.GetComponent<WeaponAimFireController>();
             modes.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+            // Head Vulcan is off in BEAM RIFLE (the right thumb fires the rifle there);
+            // start in HEAD VULCAN mode = the old default behaviour.
+            modes.vulcan = suitRoot.GetComponent<HeadVulcanController>();
+            modes.startMode = WeaponModeController.Mode.HeadVulcan;
 
             // --- Real Gundam right arm + saber ---
             GameObject gundam = gundamResult != null ? gundamResult.instance : null;
@@ -1032,8 +1049,11 @@ namespace Gundam.EditorTools
                 Transform shoulder = FindDeepChild(gundam.transform, "RightShoulder");
                 if (upper != null && fore != null && handBone != null)
                 {
+                    // Arm only (per "일단 건담 팔만 보여야"): RightShoulder is no longer
+                    // included - its skin carried the chest/collar armor right next to
+                    // the head camera.
                     SkinnedMeshRenderer armView = BuildGundamRightArmView(gundam,
-                        new[] { "RightShoulder", "RightArm", "RightForeArm", "RightHand" });
+                        new[] { "RightArm", "RightForeArm", "RightHand" });
                     Transform saber = BuildBeamSaber(handBone);
 
                     BeamSaberArmController arm = gundam.AddComponent<BeamSaberArmController>();
@@ -1048,6 +1068,9 @@ namespace Gundam.EditorTools
                     Camera cam = xrOrigin != null ? xrOrigin.GetComponentInChildren<Camera>(true) : null;
                     if (cam != null) arm.pilotHead = cam.transform;
                     modes.saberArm = arm;
+
+                    // --- BEAM RIFLE (both hands) ---
+                    SetupBeamRifle(gundam, interior, suitRoot, modes, armView, rightStick, upper, fore, handBone);
                     Debug.Log("[Gundam] BEAM SABER: arm bones " + upper.name + " > " + fore.name + " > " + handBone.name +
                         (shoulder != null ? " (shoulder " + shoulder.name + ")" : "") + ", saber on " + handBone.name + ".");
                 }
@@ -1072,18 +1095,23 @@ namespace Gundam.EditorTools
                 Debug.LogWarning("[Gundam] BEAM SABER: Weapon_Canvas not found - no touch buttons.");
                 return;
             }
-            Text current = CreateUIText("CurrentWeapon", weaponCanvas, new Vector2(0, -50), new Vector2(340, 18), 14,
-                TextAnchor.MiddleCenter, new Color(0.6f, 0.9f, 1f), "SELECT: BEAM RIFLE");
-            WeaponTouchPanel.TouchButton rifleBtn = BuildTouchButton(weaponCanvas, "Btn_BeamRifle", "BEAM RIFLE",
-                new Vector2(0, -95), WeaponModeController.Mode.BeamRifle);
-            WeaponTouchPanel.TouchButton saberBtn = BuildTouchButton(weaponCanvas, "Btn_BeamSaber", "BEAM SABER",
-                new Vector2(0, -183), WeaponModeController.Mode.BeamSaber);
+            Text current = CreateUIText("CurrentWeapon", weaponCanvas, new Vector2(0, -52), new Vector2(340, 18), 14,
+                TextAnchor.MiddleCenter, new Color(0.6f, 0.9f, 1f), "SELECT: HEAD VULCAN");
+            // Three weapons side by side (per "무기에 빔라이플을 추가", HEAD VULCAN button
+            // added): 118 x 118 canvas units each (~2.8 cm square on the half-size display).
+            Vector2 btnSize = new Vector2(118, 118);
+            WeaponTouchPanel.TouchButton vulcanBtn = BuildTouchButton(weaponCanvas, "Btn_HeadVulcan", "HEAD\nVULCAN",
+                new Vector2(-126, -138), WeaponModeController.Mode.HeadVulcan, btnSize, 22);
+            WeaponTouchPanel.TouchButton rifleBtn = BuildTouchButton(weaponCanvas, "Btn_BeamRifle", "BEAM\nRIFLE",
+                new Vector2(0, -138), WeaponModeController.Mode.BeamRifle, btnSize, 22);
+            WeaponTouchPanel.TouchButton saberBtn = BuildTouchButton(weaponCanvas, "Btn_BeamSaber", "BEAM\nSABER",
+                new Vector2(126, -138), WeaponModeController.Mode.BeamSaber, btnSize, 22);
 
             WeaponTouchPanel panel = weaponCanvas.gameObject.AddComponent<WeaponTouchPanel>();
             panel.weapons = modes;
             panel.leftHand = leftHand;
             panel.rightHand = rightHand;
-            panel.buttons = new[] { rifleBtn, saberBtn };
+            panel.buttons = new[] { vulcanBtn, rifleBtn, saberBtn };
             panel.currentText = current;
         }
 
@@ -1147,9 +1175,15 @@ namespace Gundam.EditorTools
         static WeaponTouchPanel.TouchButton BuildTouchButton(Transform canvas, string name, string label, Vector2 pos,
             WeaponModeController.Mode mode)
         {
-            Vector2 size = new Vector2(340, 72); // taller so it stays finger-sized after the display cluster is halved
+            // taller so it stays finger-sized after the display cluster is halved
+            return BuildTouchButton(canvas, name, label, pos, mode, new Vector2(340, 72), 24);
+        }
+
+        static WeaponTouchPanel.TouchButton BuildTouchButton(Transform canvas, string name, string label, Vector2 pos,
+            WeaponModeController.Mode mode, Vector2 size, int fontSize)
+        {
             Image bg = CreateUIImage(name, canvas, pos, size, new Color(0.08f, 0.12f, 0.2f, 0.95f));
-            Text t = CreateUIText(name + "_Label", bg.transform, Vector2.zero, size, 24, TextAnchor.MiddleCenter,
+            Text t = CreateUIText(name + "_Label", bg.transform, Vector2.zero, size, fontSize, TextAnchor.MiddleCenter,
                 new Color(0.75f, 0.85f, 1f), label);
             return new WeaponTouchPanel.TouchButton { mode = mode, rect = bg.rectTransform, background = bg, label = t };
         }
@@ -1158,10 +1192,17 @@ namespace Gundam.EditorTools
         /// of the real Gundam mesh whose vertices are all mainly weighted to the given bones,
         /// skinned to the same real bone array - so the real right arm can be shown while the
         /// rest of the (pilot's own) body stays hidden. Mesh cached as an asset.</summary>
+        const float ArmViewMinBoneWeight = 0.6f;
+
         static SkinnedMeshRenderer BuildGundamRightArmView(GameObject gundam, string[] boneNames)
         {
+            return BuildGundamArmView(gundam, boneNames, "GundamRightArm_View", GundamRightArmMeshPath);
+        }
+
+        static SkinnedMeshRenderer BuildGundamArmView(GameObject gundam, string[] boneNames, string viewName, string meshPath)
+        {
             SkinnedMeshRenderer src = gundam.GetComponentsInChildren<SkinnedMeshRenderer>(true)
-                .FirstOrDefault(r => r.sharedMesh != null && r.gameObject.name != "GundamRightArm_View");
+                .FirstOrDefault(r => r.sharedMesh != null && !r.gameObject.name.EndsWith("_View"));
             if (src == null) return null;
             UnityEngine.Mesh m = src.sharedMesh;
             Transform[] bones = src.bones;
@@ -1182,10 +1223,17 @@ namespace Gundam.EditorTools
             var nu = new System.Collections.Generic.List<Vector2>();
             var nw = new System.Collections.Generic.List<BoneWeight>();
             var ntri = new System.Collections.Generic.List<int>();
+            // Keep a triangle when, on average over its 3 vertices, at least
+            // ArmViewMinBoneWeight of the skinning comes from the given bones. (The
+            // old "every vertex's main bone" test left ragged holes where the arm
+            // meets the shoulder and let chest pieces in via RightShoulder.)
+            System.Func<BoneWeight, float> armW = w =>
+                (keep.Contains(w.boneIndex0) ? w.weight0 : 0f) + (keep.Contains(w.boneIndex1) ? w.weight1 : 0f) +
+                (keep.Contains(w.boneIndex2) ? w.weight2 : 0f) + (keep.Contains(w.boneIndex3) ? w.weight3 : 0f);
             for (int t = 0; t < tris.Length; t += 3)
             {
                 int a = tris[t], b = tris[t + 1], c = tris[t + 2];
-                if (!keep.Contains(bw[a].boneIndex0) || !keep.Contains(bw[b].boneIndex0) || !keep.Contains(bw[c].boneIndex0)) continue;
+                if ((armW(bw[a]) + armW(bw[b]) + armW(bw[c])) / 3f < ArmViewMinBoneWeight) continue;
                 foreach (int v in new[] { a, b, c })
                 {
                     if (remap[v] < 0)
@@ -1201,7 +1249,7 @@ namespace Gundam.EditorTools
                 }
             }
 
-            UnityEngine.Mesh arm = new UnityEngine.Mesh { name = "GundamRightArm_View" };
+            UnityEngine.Mesh arm = new UnityEngine.Mesh { name = viewName };
             if (nv.Count > 65000) arm.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
             arm.SetVertices(nv);
             if (nn.Count == nv.Count) arm.SetNormals(nn);
@@ -1212,11 +1260,11 @@ namespace Gundam.EditorTools
             arm.SetTriangles(ntri, 0);
             arm.RecalculateBounds();
 
-            UnityEngine.Mesh existing = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(GundamRightArmMeshPath);
-            if (existing != null) AssetDatabase.DeleteAsset(GundamRightArmMeshPath);
-            AssetDatabase.CreateAsset(arm, GundamRightArmMeshPath);
+            UnityEngine.Mesh existing = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(meshPath);
+            if (existing != null) AssetDatabase.DeleteAsset(meshPath);
+            AssetDatabase.CreateAsset(arm, meshPath);
 
-            GameObject go = new GameObject("GundamRightArm_View");
+            GameObject go = new GameObject(viewName);
             go.transform.SetParent(src.transform.parent, false);
             go.transform.localPosition = src.transform.localPosition;
             go.transform.localRotation = src.transform.localRotation;
@@ -1230,7 +1278,7 @@ namespace Gundam.EditorTools
             smr.updateWhenOffscreen = true;
             smr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             smr.enabled = false; // shown only in BEAM SABER mode
-            Debug.Log("[Gundam] GundamRightArm_View: " + nv.Count + " verts / " + (ntri.Count / 3) + " tris from bones " + string.Join(", ", boneNames));
+            Debug.Log("[Gundam] " + viewName + ": " + nv.Count + " verts / " + (ntri.Count / 3) + " tris from bones " + string.Join(", ", boneNames));
             return smr;
         }
 
@@ -1382,6 +1430,142 @@ namespace Gundam.EditorTools
             }
             axis = a;
             return true;
+        }
+
+        // ---------------------------------------------------------------
+        // BEAM RIFLE - per "다운로드에 빔라이플을 다운해두었거든 무기에 빔라이플을
+        // 추가하고 ... 빔라이플을 양손으로 잡는거야 ... 락온한 상대를 쏠거야 쏘는거는
+        // 오른손 엄지", "빔 데미지는 500". The downloaded model (copied to
+        // BeamRifleModelPath with its base-color texture) is held in both hands by
+        // BeamRifleController; the left arm gets its own arm-only view.
+        //
+        // Model space (the FBX prefab root, measured from its vertices): the
+        // rifle stands along Y with the MUZZLE at -Y, its top toward +Z (pistol
+        // grip / magazine hang toward -Z). Points below are in that space and are
+        // turned/scaled into the rifle root (+Z muzzle, +Y top, metres).
+        // ---------------------------------------------------------------
+        const string BeamRifleModelPath = "Assets/Models/BeamRifle/BeamRifle.fbx";
+        const string BeamRifleTexturePath = "Assets/Models/BeamRifle/BeamRifle-baseColor.png";
+        const string GundamLeftArmMeshPath = "Assets/Models/Gundam/GundamLeftArm_View.asset";
+        const float BeamRifleScale = 5.5f;  // model is ~1 unit long -> 5.5 m rifle
+        static readonly Vector3 RifleModelStock = new Vector3(0f, 0.495f, 0.07f);
+        static readonly Vector3 RifleModelMuzzle = new Vector3(0f, -0.50f, 0.06f);
+        static readonly Vector3 RifleModelGrip = new Vector3(0f, 0.199f, -0.130f);          // pistol grip middle
+        static readonly Vector3 RifleModelGripOutward = new Vector3(0f, 0.709f, -0.706f);   // toward the grip's bottom
+        static readonly Vector3 RifleModelForeGrip = new Vector3(0f, -0.15f, 0.04f);        // fore-end, left hand
+
+        /// <summary>Model (prefab) space -> rifle root space: prefab -Y -> +Z (muzzle), prefab +Z -> +Y (top).</summary>
+        static Quaternion RifleModelToRoot => Quaternion.Inverse(Quaternion.LookRotation(Vector3.down, Vector3.forward));
+
+        static void SetupBeamRifle(GameObject gundam, GameObject interior, GameObject suitRoot, WeaponModeController modes,
+            SkinnedMeshRenderer saberArmView, JoystickLever rightStick, Transform rUpper, Transform rFore, Transform rHand)
+        {
+            Transform lUpper = FindDeepChild(gundam.transform, "LeftArm");
+            Transform lFore = FindDeepChild(gundam.transform, "LeftForeArm");
+            Transform lHand = FindDeepChild(gundam.transform, "LeftHand");
+            if (lUpper == null || lFore == null || lHand == null)
+            {
+                Debug.LogWarning("[Gundam] BEAM RIFLE: LeftArm/LeftForeArm/LeftHand bones not found - rifle disabled.");
+                return;
+            }
+
+            Transform rifle = BuildBeamRifle(gundam.transform);
+            if (rifle == null) return;
+
+            SkinnedMeshRenderer leftView = BuildGundamArmView(gundam, new[] { "LeftArm", "LeftForeArm", "LeftHand" },
+                "GundamLeftArm_View", GundamLeftArmMeshPath);
+            // Separate right-arm renderer (same arm-only mesh) so the saber's own
+            // show/hide of its arm view never hides the arm while the rifle is out.
+            SkinnedMeshRenderer rightView = null;
+            if (saberArmView != null)
+            {
+                GameObject rv = new GameObject("GundamRightArm_RifleView");
+                rv.transform.SetParent(saberArmView.transform.parent, false);
+                rv.transform.localPosition = saberArmView.transform.localPosition;
+                rv.transform.localRotation = saberArmView.transform.localRotation;
+                rv.transform.localScale = saberArmView.transform.localScale;
+                rv.layer = 0;
+                rightView = rv.AddComponent<SkinnedMeshRenderer>();
+                rightView.sharedMesh = saberArmView.sharedMesh;
+                rightView.bones = saberArmView.bones;
+                rightView.rootBone = saberArmView.rootBone;
+                rightView.sharedMaterials = saberArmView.sharedMaterials;
+                rightView.updateWhenOffscreen = true;
+                rightView.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                rightView.enabled = false;
+            }
+
+            BeamRifleController rc = gundam.AddComponent<BeamRifleController>();
+            rc.rightUpperArm = rUpper; rc.rightForeArm = rFore; rc.rightHand = rHand;
+            rc.leftUpperArm = lUpper; rc.leftForeArm = lFore; rc.leftHand = lHand;
+            rc.rifle = rifle;
+            rc.rightArmView = rightView;
+            rc.leftArmView = leftView;
+
+            Quaternion q = RifleModelToRoot;
+            float S = BeamRifleScale;
+            rc.stockPoint = q * RifleModelStock * S;
+            rc.muzzlePoint = q * RifleModelMuzzle * S;
+            rc.rightGripPoint = q * RifleModelGrip * S;
+            Vector3 thumb = (q * -RifleModelGripOutward).normalized;                    // toward the rifle body
+            rc.rightGripThumb = thumb;
+            rc.rightGripFingers = Vector3.ProjectOnPlane(Vector3.forward, thumb).normalized; // knuckles toward the muzzle
+            rc.leftGripPoint = q * RifleModelForeGrip * S;
+            rc.leftGripThumb = Vector3.forward;  // thumb along the barrel
+            rc.leftGripFingers = Vector3.right;  // fingers wrap across under the fore-end (palm up)
+            rc.rightFistGrip = BeamSaberGripInHand;
+
+            rc.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+            rc.cockpitSpace = interior.transform;
+            rc.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
+            rc.fireButtons = rightStick != null ? rightStick.GetComponent<JoystickFingerButtons>() : null;
+            rc.damage = 500;
+            rc.shotGlowMaterial = MakeEmissiveMat(new Color(1f, 0.3f, 0.65f), new Color(3.2f, 0.7f, 1.8f));
+            rc.shotCoreMaterial = MakeEmissiveMat(new Color(1f, 0.92f, 0.97f), new Color(4f, 3f, 3.6f));
+            rc.weaponHUD = interior.GetComponentInChildren<CockpitWeaponHUD>(true);
+
+            modes.rifle = rc;
+            Debug.Log("[Gundam] BEAM RIFLE: rifle " + (BeamRifleScale).ToString("F1") + " m, both hands (" + rHand.name + " grip, " + lHand.name +
+                " fore-end), fire = right thumb button" + (rc.fireButtons != null ? "" : " (NOT FOUND)") + ", lock = " +
+                (rc.targetLock != null ? "OrbitHUD" : "none") + ".");
+        }
+
+        static Transform BuildBeamRifle(Transform gundamRoot)
+        {
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(BeamRifleModelPath);
+            if (asset == null)
+            {
+                Debug.LogWarning("[Gundam] BEAM RIFLE: model not found at " + BeamRifleModelPath + " - rifle disabled.");
+                return null;
+            }
+            GameObject root = new GameObject("BeamRifle");
+            root.transform.SetParent(gundamRoot, false);
+            float ls = gundamRoot.lossyScale.x > 0.0001f ? 1f / gundamRoot.lossyScale.x : 1f;
+            root.transform.localScale = Vector3.one * ls; // 1 unit = 1 m
+            root.layer = 0;
+
+            GameObject model = (GameObject)PrefabUtility.InstantiatePrefab(asset);
+            model.name = "BeamRifle_Model";
+            model.transform.SetParent(root.transform, false);
+            model.transform.localPosition = Vector3.zero;
+            model.transform.localRotation = RifleModelToRoot;
+            model.transform.localScale = Vector3.one * BeamRifleScale;
+
+            Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(BeamRifleTexturePath);
+            Material mat = MakeMat(Color.white);
+            mat.name = "BeamRifle";
+            if (tex != null) mat.mainTexture = tex;
+            foreach (Renderer r in model.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            foreach (Collider c in model.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            SetLayerRecursively(root, 0);
+            root.SetActive(false); // shown only in BEAM RIFLE mode
+            return root.transform;
         }
 
         static void HiltExtents(GameObject hilt, Transform space, out Vector3 min, out Vector3 max)

@@ -31,6 +31,16 @@ namespace Gundam.Cockpit
     /// view follows the target instead, SaberLookAssist) - and put back afterwards.
     /// No hand-held stick is used, and no wait for the right hand to let go.
     ///
+    /// THREE MODES now (per "무기에 빔라이플을 추가하고 ... 빔라이플 모드에서는
+    /// 해드발칸은 사용안함", option "HEAD VULCAN 버튼 추가"):
+    ///   HEAD VULCAN (default) - exactly the old joystick mode: RightJoystick
+    ///                           aims/turns the view, right thumb = Head Vulcan.
+    ///   BEAM RIFLE            - same RightJoystick look, but the Gundam holds the
+    ///                           rifle in both hands (BeamRifleController) and the
+    ///                           right thumb fires it at the locked target; the
+    ///                           Head Vulcan component is switched off.
+    ///   BEAM SABER            - as described above (thumb = Head Vulcan).
+    ///
     /// Choosing another weapon undoes all of that, so the right hand can grab and
     /// aim with RightJoystick again. RightJoystick's own code is not modified -
     /// only these two references are swapped at runtime and put back. If the right
@@ -40,7 +50,8 @@ namespace Gundam.Cockpit
     /// </summary>
     public class WeaponModeController : MonoBehaviour
     {
-        public enum Mode { BeamRifle, BeamSaber }
+        // Values kept stable (BeamRifle = 0, BeamSaber = 1) for already-built scenes.
+        public enum Mode { BeamRifle = 0, BeamSaber = 1, HeadVulcan = 2 }
 
         [Header("Right joystick (blocked in BEAM SABER)")]
         public JoystickLever rightStick;
@@ -57,7 +68,14 @@ namespace Gundam.Cockpit
         public BeamSaberControlStick saberStick;
         public BeamSaberArmController saberArm;
 
-        public Mode CurrentMode { get; private set; } = Mode.BeamRifle;
+        [Header("BEAM RIFLE")]
+        public BeamRifleController rifle;
+        [Tooltip("Switched off while BEAM RIFLE is active (the right thumb fires the rifle instead).")]
+        public HeadVulcanController vulcan;
+        [Tooltip("Mode at start.")]
+        public Mode startMode = Mode.HeadVulcan;
+
+        public Mode CurrentMode { get; private set; } = Mode.HeadVulcan;
         public bool HasPending => _pending.HasValue;
         public Mode? PendingMode => _pending;
         public event Action<Mode> ModeChanged;
@@ -69,11 +87,12 @@ namespace Gundam.Cockpit
         JoystickLever _savedViewStick;
         Mode? _pending;
 
-        public static string DisplayName(Mode m) => m == Mode.BeamSaber ? "BEAM SABER" : "BEAM RIFLE";
+        public static string DisplayName(Mode m) =>
+            m == Mode.BeamSaber ? "BEAM SABER" : m == Mode.BeamRifle ? "BEAM RIFLE" : "HEAD VULCAN";
 
         void Start()
         {
-            ApplyMode(Mode.BeamRifle, force: true);
+            ApplyMode(startMode, force: true);
         }
 
         /// <summary>Called by the WEAPON display buttons.</summary>
@@ -123,6 +142,8 @@ namespace Gundam.Cockpit
                 if (useStick) saberStick.SpawnAtHand();
             }
             if (saberArm != null) saberArm.SetActive(saber);
+            if (rifle != null) rifle.SetActive(m == Mode.BeamRifle);
+            if (vulcan != null) vulcan.enabled = m != Mode.BeamRifle;
 
             ModeChanged?.Invoke(m);
         }

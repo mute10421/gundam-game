@@ -68,6 +68,7 @@
     <Compile Include="Assets\Scripts\Cockpit\ShipMovementController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandJointTracker.cs" />
     <Compile Include="Assets\Scripts\Cockpit\BeamSaberControlStick.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\BeamRifleController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitViewController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanBullet.cs" />
     <Compile Include="Assets\Scripts\Cockpit\BeamSaberArmController.cs" />
@@ -82,6 +83,7 @@
     <Compile Include="Assets\Scripts\Cockpit\HandSubsystemBootDiagnostics.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CalibrationManager.cs" />
     <Compile Include="Assets\Scripts\Cockpit\TargetingHUD.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\BeamRifleShot.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HitTarget.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponTouchPanel.cs" />

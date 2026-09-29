@@ -27,24 +27,51 @@ namespace Gundam.Cockpit
     /// (and everything parented under it, including the Head bone and HeadCam)
     /// now translates rigidly along with the player's own movement.
     ///
-    /// Position only - never rotation, and nothing here writes to
+    /// Position only - never rotation (UPDATE: except the body yaw, see BODY TURN below), and nothing here writes to
     /// MobileSuitRoot, JoystickLever, or any camera/HMD transform.
     /// ExternalGundam's own rotation stays exactly as PlaceExternalGundam set
     /// it (Quaternion.identity); GundamHeadCam360 separately still owns turning
     /// the Head BONE's rotation to track the pilot's own look direction, and
     /// this script never touches that.
     ///
+    /// BODY TURN (faceViewDirection, per "건담이 내가 바라보는 방향으로 항상 몸이
+    /// 돌아야함"): the body now also YAWS to face the direction the pilot is
+    /// looking - CockpitViewController.Yaw, i.e. what the cockpit's front shows
+    /// (RightJoystick look, or the locked target in BEAM SABER). Yaw only, never
+    /// pitch/roll. It turns about a vertical axis through turnPivot (the Head
+    /// bone), so HeadCam - which sits in the head and renders the pilot's whole
+    /// 360 view - stays exactly where it is while the body swings around under it:
+    /// no view shift, only the body (and the BEAM SABER arm) turns. Still nothing
+    /// here writes to MobileSuitRoot, the XR rig, the cockpit, or any camera.
+    /// Runs early in LateUpdate (order -60) so the arm IK (BeamSaberArmController,
+    /// -50) and the head/360 camera (GundamHeadCam360) see this frame's body pose.
+    ///
     /// LateUpdate (not Update) so this applies AFTER ShipMovementController has
     /// already moved MobileSuitRoot for the frame - no one-frame lag between
     /// the suit moving and the exterior view following it.
     /// </summary>
+    [DefaultExecutionOrder(-60)]
     public class ExternalGundamFollower : MonoBehaviour
     {
         [Tooltip("MobileSuitRoot - the player's own suit/cockpit root this object should translate together with.")]
         public Transform target;
 
+        [Header("Body turn (face the view direction)")]
+        public bool faceViewDirection = true;
+        [Tooltip("Its Yaw is the direction the body turns to face.")]
+        public CockpitViewController viewController;
+        [Tooltip("The body turns about a vertical axis through this (the Head bone), so HeadCam doesn't move.")]
+        public Transform turnPivot;
+        [Tooltip("How quickly the body catches up with the view (higher = tighter).")]
+        public float turnSharpness = 10f;
+        [Tooltip("Max body turn speed (deg/s).")]
+        public float maxTurnSpeed = 360f;
+
         Vector3 _offset;
         bool _haveOffset;
+        Quaternion _startRotation;
+        Vector3 _pivotLocal;   // pivot relative to this transform, in its start orientation
+        float _bodyYaw;
 
         void LateUpdate()
         {
@@ -59,10 +86,33 @@ namespace Gundam.Cockpit
                 // still PlaceExternalGundam's original placement since nothing
                 // moves either object before Play starts.
                 _offset = transform.position - target.position;
+                _startRotation = transform.rotation;
+                _pivotLocal = turnPivot != null
+                    ? Quaternion.Inverse(_startRotation) * (turnPivot.position - transform.position)
+                    : Vector3.zero;
+                _bodyYaw = 0f;
                 _haveOffset = true;
             }
 
-            transform.position = target.position + _offset;
+            Vector3 basePos = target.position + _offset;
+
+            if (!faceViewDirection || viewController == null)
+            {
+                transform.position = basePos;
+                return;
+            }
+
+            float dt = Time.deltaTime;
+            float wantYaw = viewController.Yaw;
+            float k = 1f - Mathf.Exp(-Mathf.Max(0f, turnSharpness) * dt);
+            float step = Mathf.DeltaAngle(_bodyYaw, wantYaw) * k;
+            float maxStep = maxTurnSpeed * dt;
+            _bodyYaw += Mathf.Clamp(step, -maxStep, maxStep);
+
+            Quaternion rot = Quaternion.AngleAxis(_bodyYaw, Vector3.up) * _startRotation;
+            Vector3 pivotWorld = basePos + _startRotation * _pivotLocal; // where the pivot is when not turned
+            transform.rotation = rot;
+            transform.position = pivotWorld - rot * _pivotLocal;
         }
     }
 }

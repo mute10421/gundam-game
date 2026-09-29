@@ -21,6 +21,16 @@ namespace Gundam.Cockpit
     ///                          the Gundam's right arm + beam saber are shown and
     ///                          driven from that stick (BeamSaberArmController).
     ///
+    /// NOW (rightStickDrivesSaber, per "빔샤벨 조종기를 빼고 오른쪽 조종관으로 밀고
+    /// 당기기는 찌르기 옆으로 당기면 옆으로 휘둘러"): in BEAM SABER the right hand
+    /// keeps RightJoystick and it drives the saber instead (BeamSaberArmController
+    /// reads its tiltInput: push/pull = thrust, sideways = swing). RightJoystick is
+    /// NOT blocked then; instead its normal consumers are detached for the mode -
+    /// WeaponAimFireController is disabled (so a forward thrust can't fire the
+    /// rifle) and CockpitViewController's rightJoystick reference is emptied (the
+    /// view follows the target instead, SaberLookAssist) - and put back afterwards.
+    /// No hand-held stick is used, and no wait for the right hand to let go.
+    ///
     /// Choosing another weapon undoes all of that, so the right hand can grab and
     /// aim with RightJoystick again. RightJoystick's own code is not modified -
     /// only these two references are swapped at runtime and put back. If the right
@@ -38,6 +48,12 @@ namespace Gundam.Cockpit
         public XRSimpleInteractable rightStickInteractable;
 
         [Header("BEAM SABER")]
+        [Tooltip("RightJoystick drives the saber in BEAM SABER (thrust / swing). Off = old behaviour: RightJoystick blocked + hand-held saberStick.")]
+        public bool rightStickDrivesSaber = true;
+        [Tooltip("Disabled while BEAM SABER is active (so a thrust doesn't fire the rifle).")]
+        public WeaponAimFireController aim;
+        [Tooltip("Its rightJoystick reference is emptied while BEAM SABER is active (view follows the target instead).")]
+        public CockpitViewController viewController;
         public BeamSaberControlStick saberStick;
         public BeamSaberArmController saberArm;
 
@@ -48,6 +64,9 @@ namespace Gundam.Cockpit
 
         HandJointTracker _savedRightTracker;
         bool _rightBlocked;
+        bool _consumersDetached;
+        bool _aimWasEnabled;
+        JoystickLever _savedViewStick;
         Mode? _pending;
 
         public static string DisplayName(Mode m) => m == Mode.BeamSaber ? "BEAM SABER" : "BEAM RIFLE";
@@ -61,7 +80,7 @@ namespace Gundam.Cockpit
         public void SelectWeapon(Mode m)
         {
             if (m == CurrentMode && !_pending.HasValue) return;
-            if (m == Mode.BeamSaber && rightStick != null && rightStick.isGrabbed)
+            if (m == Mode.BeamSaber && !rightStickDrivesSaber && rightStick != null && rightStick.isGrabbed)
             {
                 _pending = m; // wait for the right hand to let go of RightJoystick
                 return;
@@ -86,16 +105,45 @@ namespace Gundam.Cockpit
             CurrentMode = m;
             bool saber = m == Mode.BeamSaber;
 
-            SetRightJoystickBlocked(saber);
+            if (rightStickDrivesSaber)
+            {
+                SetRightJoystickBlocked(false);
+                SetConsumersDetached(saber);
+            }
+            else
+            {
+                SetConsumersDetached(false);
+                SetRightJoystickBlocked(saber);
+            }
 
             if (saberStick != null)
             {
-                saberStick.gameObject.SetActive(saber);
-                if (saber) saberStick.SpawnAtHand();
+                bool useStick = saber && !rightStickDrivesSaber;
+                saberStick.gameObject.SetActive(useStick);
+                if (useStick) saberStick.SpawnAtHand();
             }
             if (saberArm != null) saberArm.SetActive(saber);
 
             ModeChanged?.Invoke(m);
+        }
+
+        /// <summary>BEAM SABER with RightJoystick driving the saber: take the stick
+        /// away from aiming and view turning (only references/enabled flags - their
+        /// code is unchanged), and give it back afterwards.</summary>
+        void SetConsumersDetached(bool detach)
+        {
+            if (detach && !_consumersDetached)
+            {
+                if (aim != null) { _aimWasEnabled = aim.enabled; aim.enabled = false; }
+                if (viewController != null) { _savedViewStick = viewController.rightJoystick; viewController.rightJoystick = null; }
+                _consumersDetached = true;
+            }
+            else if (!detach && _consumersDetached)
+            {
+                if (aim != null) aim.enabled = _aimWasEnabled;
+                if (viewController != null && viewController.rightJoystick == null) viewController.rightJoystick = _savedViewStick;
+                _consumersDetached = false;
+            }
         }
 
         void SetRightJoystickBlocked(bool block)

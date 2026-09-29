@@ -994,9 +994,15 @@ namespace Gundam.EditorTools
         const string BeamSaberHiltPath = "Assets/Models/BeamSaber/BeamSaberHilt.fbx";
         const string BeamSaberHiltTexturePath = "Assets/Models/BeamSaber/BeamSaberHilt-baseColor.png";
         const string GundamRightArmMeshPath = "Assets/Models/Gundam/GundamRightArm_View.asset";
-        const float BeamSaberHiltLength = 1.8f;   // m, Gundam scale
+        const float BeamSaberHiltLength = 2.4f;   // m, Gundam scale - long enough to stick out of both sides of the fist (~1.5 m)
         const float BeamSaberBladeLength = 9f;    // m
         const float BeamSaberBladeRadius = 0.28f; // m
+        // Where the hilt passes through the Gundam's (closed) right fist, in RightHand-bone
+        // space, metres, unscaled - measured from the model's fist mesh: x toward the palm/
+        // finger channel, y = mid-fist, z = along the fingers from the wrist. The grip axis is
+        // the bone's +Y (index/thumb side), so the blade comes out over the thumb like a real
+        // grip ("건담 손에 빔샤벨을 쥐고있어야").
+        static readonly Vector3 BeamSaberGripInHand = new Vector3(-0.24f, 0.13f, 0.80f);
 
         static void SetupBeamSaberMode(GameObject suitRoot, GameObject interior, GundamPlacementResult gundamResult,
             JoystickLever rightStick, HandJointTracker leftHand, HandJointTracker rightHand, GameObject xrOrigin)
@@ -1007,45 +1013,14 @@ namespace Gundam.EditorTools
             modes.rightStickInteractable = rightStick != null && rightStick.handle != null
                 ? rightStick.handle.GetComponent<XRSimpleInteractable>() : null;
 
-            Transform rightNearFar = null;
-            if (xrOrigin != null)
-            {
-                Transform rh = FindDeepChild(xrOrigin.transform, "Right Hand");
-                rightNearFar = rh != null ? FindDeepChild(rh, "Near-Far Interactor") : null;
-            }
-
-            // --- Hand-held control stick (cockpit space, hidden until BEAM SABER) ---
-            Material stickMat = MakeEmissiveMat(new Color(0.12f, 0.12f, 0.14f), new Color(0.9f, 0.2f, 0.55f) * 0.35f);
-            GameObject stickRoot = new GameObject("BeamSaberControlStick");
-            stickRoot.transform.SetParent(interior.transform, false);
-            BeamSaberControlStick stick = stickRoot.AddComponent<BeamSaberControlStick>();
-            stickRoot.transform.localPosition = stick.defaultLocalPosition;
-            // 14 cm long, 3.4 cm thick grip (Unity cylinder = 2 units tall).
-            GameObject grip = CreateCylinder("BeamSaberControlStick_Grip", stickRoot.transform, Vector3.zero,
-                new Vector3(0.034f, 0.07f, 0.034f), stickMat);
-            GameObject capTop = CreateSphere("BeamSaberControlStick_TopCap", stickRoot.transform, new Vector3(0f, 0.072f, 0f),
-                new Vector3(0.038f, 0.02f, 0.038f), MakeEmissiveMat(new Color(0.5f, 0.1f, 0.3f), new Color(1f, 0.3f, 0.7f)));
-            StripCollider(capTop);
-            XRSimpleInteractable stickInteractable = grip.AddComponent<XRSimpleInteractable>();
-            Collider gripCol = grip.GetComponent<Collider>();
-            if (gripCol != null)
-            {
-                SerializedObject so = new SerializedObject(stickInteractable);
-                SerializedProperty cols = so.FindProperty("m_Colliders");
-                if (cols != null)
-                {
-                    cols.ClearArray();
-                    cols.InsertArrayElementAtIndex(0);
-                    cols.GetArrayElementAtIndex(0).objectReferenceValue = gripCol;
-                    so.ApplyModifiedProperties();
-                }
-            }
-            stick.interactable = stickInteractable;
-            stick.hand = rightHand;
-            stick.onlyAllowedInteractor = rightNearFar;
-            stick.halfLength = 0.07f;
-            if (rightNearFar == null) stickInteractable.enabled = false; // no XRI rig: right-hand grip fallback only
-            modes.saberStick = stick;
+            // RightJoystick itself drives the saber in BEAM SABER mode (per "빔샤벨 조종기를
+            // 빼고 오른쪽 조종관으로 밀고 당기기는 찌르기 옆으로 당기면 옆으로 휘둘러"):
+            // push/pull = thrust, sideways = horizontal swing. The separate hand-held
+            // BeamSaberControlStick is no longer built. In that mode the stick's usual
+            // consumers (aim, view turning) are detached; its movement code is untouched.
+            modes.rightStickDrivesSaber = true;
+            modes.aim = suitRoot.GetComponent<WeaponAimFireController>();
+            modes.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
 
             // --- Real Gundam right arm + saber ---
             GameObject gundam = gundamResult != null ? gundamResult.instance : null;
@@ -1067,7 +1042,7 @@ namespace Gundam.EditorTools
                     arm.handBone = handBone;
                     arm.armView = armView;
                     arm.saber = saber;
-                    arm.stick = stick;
+                    arm.rightStick = rightStick; // stick deflection -> saber poses (thrust / swing)
                     arm.cockpitSpace = interior.transform;
                     arm.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
                     Camera cam = xrOrigin != null ? xrOrigin.GetComponentInChildren<Camera>(true) : null;
@@ -1081,6 +1056,14 @@ namespace Gundam.EditorTools
                     Debug.LogWarning("[Gundam] BEAM SABER: RightArm/RightForeArm/RightHand bones not found - arm control disabled.");
                 }
             }
+
+            // --- BEAM SABER view assist: the right hand can't turn the view with
+            //     RightJoystick in this mode, so the view follows the locked-on
+            //     enemy (per "락온된 상대에게 시선이 고정되서 따라가게하자"). ---
+            SaberLookAssist lookAssist = suitRoot.AddComponent<SaberLookAssist>();
+            lookAssist.modes = modes;
+            lookAssist.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+            lookAssist.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
 
             // --- WEAPON display touch buttons ---
             Transform weaponCanvas = interior.transform.Find("SystemCheckDisplay/SysCheck_Right/Weapon_Canvas");
@@ -1260,6 +1243,12 @@ namespace Gundam.EditorTools
             root.transform.SetParent(handBone, false);
             float ls = handBone.lossyScale.x > 0.0001f ? 1f / handBone.lossyScale.x : 1f;
             root.transform.localScale = Vector3.one * ls; // 1 unit = 1 m in world
+            // Seated in the fist: root origin = grip point inside the fist, root +Y (blade)
+            // = the fist's grip axis (bone +Y), root +Z = along the fingers (bone +Z).
+            // BeamSaberArmController keeps this hand->saber relation and turns the HAND
+            // so the saber points where the control stick points.
+            root.transform.localPosition = BeamSaberGripInHand * ls;
+            root.transform.localRotation = Quaternion.identity;
             root.layer = 0;
 
             float hiltLen = BeamSaberHiltLength;
@@ -1269,20 +1258,32 @@ namespace Gundam.EditorTools
                 GameObject hilt = (GameObject)PrefabUtility.InstantiatePrefab(hiltAsset);
                 hilt.name = "BeamSaber_Hilt";
                 hilt.transform.SetParent(root.transform, false);
-                // The hilt model's long axis is its local Z - turn it onto +Y (blade axis).
                 hilt.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f);
                 hilt.transform.localPosition = Vector3.zero;
                 hilt.transform.localScale = Vector3.one;
                 Renderer[] rs = hilt.GetComponentsInChildren<Renderer>(true);
+                // The model's long axis is NOT on any of its local axes (it's tilted ~30deg),
+                // which made the beam come out of the hilt at an angle ("손잡이에서 레이저가
+                // 이상하게 나오는데"). Find the real long axis from the vertices (principal
+                // axis) and turn it exactly onto +Y, emitter end up.
+                Vector3 axis;
+                if (HiltPrincipalAxis(hilt, root.transform, out axis))
+                {
+                    // Emitter = the end with the dark round emitter face; with the -90deg X
+                    // turn above that end points to -Z (checked on renders of the model).
+                    if (Vector3.Dot(axis, Vector3.back) < 0f) axis = -axis;
+                    hilt.transform.localRotation = Quaternion.FromToRotation(axis, Vector3.up) * hilt.transform.localRotation;
+                }
                 if (rs.Length > 0)
                 {
-                    Bounds b = rs[0].bounds;
-                    foreach (Renderer r in rs) b.Encapsulate(r.bounds);
-                    float longest = Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z));
-                    float s = longest > 0.0001f ? hiltLen / longest : 1f;
-                    hilt.transform.localScale = Vector3.one * (s / Mathf.Max(0.0001f, root.transform.lossyScale.x));
-                    Vector3 off = root.transform.InverseTransformPoint(b.center) * s;
-                    hilt.transform.localPosition = -off; // center the hilt on the grip point
+                    // Length along +Y and cross-section center, now that it's straight.
+                    Vector3 mn, mx;
+                    HiltExtents(hilt, root.transform, out mn, out mx);
+                    float len = mx.y - mn.y;
+                    float s = len > 0.0001f ? hiltLen / len : 1f;
+                    hilt.transform.localScale = Vector3.one * s;
+                    Vector3 mid = (mn + mx) * 0.5f;
+                    hilt.transform.localPosition = -mid * s; // hilt centered on the grip point, on the axis
                 }
                 Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(BeamSaberHiltTexturePath);
                 Material hiltMat = MakeMat(Color.white);
@@ -1325,8 +1326,70 @@ namespace Gundam.EditorTools
             tip.layer = 0;
             foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true)) r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
 
+            // Hits: 200 damage per contact (per "빔샤벨은 데미지 일단은 200") - see BeamSaberBlade.
+            BeamSaberBlade hits = root.AddComponent<BeamSaberBlade>();
+            hits.damage = 200;
+            hits.bladeStart = hiltLen * 0.5f;
+            hits.bladeLength = BeamSaberBladeLength;
+            hits.hitRadius = BeamSaberBladeRadius + 0.3f;
+            hits.sparkMaterial = glow;
+
             root.SetActive(false); // shown only in BEAM SABER mode
             return root.transform;
+        }
+
+        /// <summary>Hilt vertices (subsampled) in 'space' coordinates.</summary>
+        static System.Collections.Generic.List<Vector3> HiltPoints(GameObject hilt, Transform space)
+        {
+            var pts = new System.Collections.Generic.List<Vector3>();
+            foreach (MeshFilter mf in hilt.GetComponentsInChildren<MeshFilter>(true))
+            {
+                UnityEngine.Mesh m = mf.sharedMesh;
+                if (m == null) continue;
+                Vector3[] v = m.vertices;
+                int step = Mathf.Max(1, v.Length / 30000);
+                for (int i = 0; i < v.Length; i += step)
+                    pts.Add(space.InverseTransformPoint(mf.transform.TransformPoint(v[i])));
+            }
+            return pts;
+        }
+
+        /// <summary>Long (principal) axis of the hilt model in 'space' coordinates.</summary>
+        static bool HiltPrincipalAxis(GameObject hilt, Transform space, out Vector3 axis)
+        {
+            axis = Vector3.up;
+            var pts = HiltPoints(hilt, space);
+            if (pts.Count < 10) return false;
+            Vector3 mean = Vector3.zero;
+            foreach (Vector3 p in pts) mean += p;
+            mean /= pts.Count;
+            float xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+            foreach (Vector3 p in pts)
+            {
+                Vector3 d = p - mean;
+                xx += d.x * d.x; xy += d.x * d.y; xz += d.x * d.z;
+                yy += d.y * d.y; yz += d.y * d.z; zz += d.z * d.z;
+            }
+            // Power iteration: dominant eigenvector of the covariance.
+            Vector3 a = new Vector3(0.3f, 0.5f, 0.8f).normalized;
+            for (int it = 0; it < 64; it++)
+            {
+                Vector3 n = new Vector3(xx * a.x + xy * a.y + xz * a.z,
+                                        xy * a.x + yy * a.y + yz * a.z,
+                                        xz * a.x + yz * a.y + zz * a.z);
+                if (n.sqrMagnitude < 1e-20f) return false;
+                a = n.normalized;
+            }
+            axis = a;
+            return true;
+        }
+
+        static void HiltExtents(GameObject hilt, Transform space, out Vector3 min, out Vector3 max)
+        {
+            min = Vector3.one * float.MaxValue;
+            max = Vector3.one * float.MinValue;
+            foreach (Vector3 p in HiltPoints(hilt, space)) { min = Vector3.Min(min, p); max = Vector3.Max(max, p); }
+            if (min.x > max.x) { min = Vector3.zero; max = Vector3.zero; }
         }
 
         // ---------------------------------------------------------------

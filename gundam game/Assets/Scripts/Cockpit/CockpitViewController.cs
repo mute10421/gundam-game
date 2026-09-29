@@ -76,6 +76,31 @@ namespace Gundam.Cockpit
         /// pilot actually sees.</summary>
         public Quaternion LookRotation { get; private set; } = Quaternion.identity;
 
+        [Header("Auto look (BEAM SABER: view follows the locked target)")]
+        [Tooltip("Max turn rate (deg/s) while the view is following a target.")]
+        public float autoLookTurnSpeed = 150f;
+        [Tooltip("How quickly the view closes on the target direction (higher = snappier).")]
+        public float autoLookSharpness = 6f;
+
+        /// <summary>True while SetAutoLookTarget is steering the view (stick input ignored).</summary>
+        public bool AutoLookActive { get; private set; }
+        Vector3 _autoLookPoint;
+
+        /// <summary>Steer the view toward this world point instead of reading the stick -
+        /// call every frame (SaberLookAssist does, in BEAM SABER mode). Yaw/Pitch keep
+        /// their values when it stops, so the stick carries on from where the view is.</summary>
+        public void SetAutoLookTarget(Vector3 worldPoint)
+        {
+            AutoLookActive = true;
+            _autoLookPoint = worldPoint;
+        }
+
+        /// <summary>Give the view back to the RightJoystick.</summary>
+        public void ClearAutoLook()
+        {
+            AutoLookActive = false;
+        }
+
         static readonly int ViewRotQId = Shader.PropertyToID("_ViewRotQ");
 
         Quaternion _cameraStartLocalRotation;
@@ -109,22 +134,46 @@ namespace Gundam.Cockpit
 
         void Update()
         {
-            if (rightJoystick == null) return;
+            if (AutoLookActive)
+            {
+                // BEAM SABER lock-on follow (per "락온된 상대에게 시선이 고정되서
+                // 따라가게하자"): turn Yaw/Pitch toward the target point, smoothly and
+                // rate-limited, so it stays in front of the pilot as it moves.
+                Vector3 from = viewCamera != null ? viewCamera.transform.position : transform.position;
+                Vector3 d = _autoLookPoint - from;
+                if (d.sqrMagnitude > 0.01f)
+                {
+                    d.Normalize();
+                    float wantYaw = Mathf.Atan2(d.x, d.z) * Mathf.Rad2Deg;
+                    float wantPitch = Mathf.Clamp(Mathf.Asin(Mathf.Clamp(d.y, -1f, 1f)) * Mathf.Rad2Deg, minPitch, maxPitch);
+                    float k = 1f - Mathf.Exp(-autoLookSharpness * Time.deltaTime);
+                    float maxStep = autoLookTurnSpeed * Time.deltaTime;
+                    float dy = Mathf.Clamp(Mathf.DeltaAngle(Yaw, wantYaw) * k, -maxStep, maxStep);
+                    float dp = Mathf.Clamp((wantPitch - Pitch) * k, -maxStep, maxStep);
+                    Yaw += dy;
+                    if (Yaw > 360f || Yaw < -360f) Yaw %= 360f;
+                    Pitch = Mathf.Clamp(Pitch + dp, minPitch, maxPitch);
+                }
+            }
+            else
+            {
+                if (rightJoystick == null) return;
 
-            // JoystickLever already applies its own dead zone and eases the
-            // handle back to center on release, so center = exactly 0 = no
-            // rotation speed = the view holds its current direction.
-            Vector2 input = rightJoystick.tiltInput;
+                // JoystickLever already applies its own dead zone and eases the
+                // handle back to center on release, so center = exactly 0 = no
+                // rotation speed = the view holds its current direction.
+                Vector2 input = rightJoystick.tiltInput;
 
-            float yawInput = invertYaw ? -input.x : input.x;
-            float pitchInput = invertPitch ? -input.y : input.y;
+                float yawInput = invertYaw ? -input.x : input.x;
+                float pitchInput = invertPitch ? -input.y : input.y;
 
-            // tiltInput.x -> Yaw (+1 = turn right, -1 = turn left). Unlimited.
-            Yaw += yawInput * yawSpeed * Time.deltaTime;
-            if (Yaw > 360f || Yaw < -360f) Yaw %= 360f;
+                // tiltInput.x -> Yaw (+1 = turn right, -1 = turn left). Unlimited.
+                Yaw += yawInput * yawSpeed * Time.deltaTime;
+                if (Yaw > 360f || Yaw < -360f) Yaw %= 360f;
 
-            // tiltInput.y -> Pitch (+1 = look up, -1 = look down). Clamped.
-            Pitch = Mathf.Clamp(Pitch + pitchInput * pitchSpeed * Time.deltaTime, minPitch, maxPitch);
+                // tiltInput.y -> Pitch (+1 = look up, -1 = look down). Clamped.
+                Pitch = Mathf.Clamp(Pitch + pitchInput * pitchSpeed * Time.deltaTime, minPitch, maxPitch);
+            }
 
             // Unity: negative X rotation = nose up, so Pitch (+ = up) is negated.
             // Euler order = yaw around world up, then pitch around the turned

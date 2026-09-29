@@ -55,8 +55,10 @@
   <ItemGroup>
     <Compile Include="Assets\Scripts\Cockpit\JoystickLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpaceDebrisField.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\BeamSaberBlade.cs" />
     <Compile Include="Assets\Scripts\Cockpit\GundamHeadCam360.cs" />
     <Compile Include="Assets\Scripts\Cockpit\XRHandSpace.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\SaberLookAssist.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandTrackingStatusLogger.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalTLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\JoystickFingerButtons.cs" />

@@ -56,6 +56,7 @@
     <Compile Include="Assets\Scripts\Cockpit\JoystickLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpaceDebrisField.cs" />
     <Compile Include="Assets\Scripts\Cockpit\GundamHeadCam360.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\XRHandSpace.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandTrackingStatusLogger.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalTLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\JoystickFingerButtons.cs" />
@@ -64,13 +65,16 @@
     <Compile Include="Assets\Scripts\Cockpit\ExternalGundamFollower.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ShipMovementController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandJointTracker.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\BeamSaberControlStick.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitViewController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanBullet.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\BeamSaberArmController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitStatusHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalThrustController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitWeaponHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyMarker.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\WeaponModeController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUDManager.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandSubsystemBootDiagnostics.cs" />
@@ -78,6 +82,7 @@
     <Compile Include="Assets\Scripts\Cockpit\TargetingHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HitTarget.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\WeaponTouchPanel.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ZakuCombatAI.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpaceDustField.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyHealth.cs" />

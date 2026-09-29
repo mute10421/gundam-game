@@ -613,6 +613,18 @@ namespace Gundam.EditorTools
             //     (see PlaceSpaceDebris / SpaceDebrisField). ---
             PlaceSpaceDebris(dust.viewer);
 
+            // --- BEAM SABER mode (WEAPON display touch -> right hand leaves
+            //     RightJoystick -> hand-held control stick drives the real Gundam
+            //     right arm + saber). See SetupBeamSaberMode. ---
+            SetupBeamSaberMode(suitRoot, interior, gundamResult, rightStick, leftHand, rightHand, xrOrigin);
+
+            // --- Shrink the 3-display cluster to half size and lift it above the
+            //     hands on the sticks - per "앞에 디스플레이를 더 작게 ... 조종기랑
+            //     너무 겹쳐서 누를수가 없어" (option: 절반 크기 + 조종기 위로).
+            //     Done last so everything built on/under the displays (HUD texts,
+            //     head-cam inset, WEAPON touch buttons) scales with them. ---
+            ShrinkSystemCheckDisplay(interior.transform);
+
             // Hide the cockpit from HeadCam's exterior view (see CockpitInteriorLayer).
             // Done last so every object built under CockpitInterior above is included.
             // Only CockpitInterior - the XR Origin (hands etc.) keeps its own layers.
@@ -965,6 +977,358 @@ namespace Gundam.EditorTools
         // Same defensive "not imported yet" handling as PlaceExternalGundam
         // above (never fails the rest of the scene build).
         // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // BEAM SABER mode - per "빔샤벨 모드" + "전용 컨트롤 스틱". Builds:
+        //   * WEAPON display touch buttons (BEAM RIFLE / BEAM SABER) on the
+        //     existing Weapon_Canvas (SysCheck_Right) + WeaponTouchPanel
+        //   * WeaponModeController (switches who owns the right hand)
+        //   * BeamSaberControlStick - the short hand-held stick (BEAM SABER only)
+        //   * GundamRightArm_View - the real Gundam mesh's right-arm triangles,
+        //     skinned to the same real bones, on a visible layer (hidden until
+        //     BEAM SABER) + BeamSaber (the downloaded hilt model + a beam blade)
+        //     attached to the real RightHand bone
+        //   * BeamSaberArmController - stick -> 2-bone IK on the real arm bones
+        // Nothing existing is re-created or rewired except RightJoystick's two
+        // runtime references WeaponModeController swaps (and restores).
+        // ---------------------------------------------------------------
+        const string BeamSaberHiltPath = "Assets/Models/BeamSaber/BeamSaberHilt.fbx";
+        const string BeamSaberHiltTexturePath = "Assets/Models/BeamSaber/BeamSaberHilt-baseColor.png";
+        const string GundamRightArmMeshPath = "Assets/Models/Gundam/GundamRightArm_View.asset";
+        const float BeamSaberHiltLength = 1.8f;   // m, Gundam scale
+        const float BeamSaberBladeLength = 9f;    // m
+        const float BeamSaberBladeRadius = 0.28f; // m
+
+        static void SetupBeamSaberMode(GameObject suitRoot, GameObject interior, GundamPlacementResult gundamResult,
+            JoystickLever rightStick, HandJointTracker leftHand, HandJointTracker rightHand, GameObject xrOrigin)
+        {
+            // --- Mode controller ---
+            WeaponModeController modes = suitRoot.AddComponent<WeaponModeController>();
+            modes.rightStick = rightStick;
+            modes.rightStickInteractable = rightStick != null && rightStick.handle != null
+                ? rightStick.handle.GetComponent<XRSimpleInteractable>() : null;
+
+            Transform rightNearFar = null;
+            if (xrOrigin != null)
+            {
+                Transform rh = FindDeepChild(xrOrigin.transform, "Right Hand");
+                rightNearFar = rh != null ? FindDeepChild(rh, "Near-Far Interactor") : null;
+            }
+
+            // --- Hand-held control stick (cockpit space, hidden until BEAM SABER) ---
+            Material stickMat = MakeEmissiveMat(new Color(0.12f, 0.12f, 0.14f), new Color(0.9f, 0.2f, 0.55f) * 0.35f);
+            GameObject stickRoot = new GameObject("BeamSaberControlStick");
+            stickRoot.transform.SetParent(interior.transform, false);
+            BeamSaberControlStick stick = stickRoot.AddComponent<BeamSaberControlStick>();
+            stickRoot.transform.localPosition = stick.defaultLocalPosition;
+            // 14 cm long, 3.4 cm thick grip (Unity cylinder = 2 units tall).
+            GameObject grip = CreateCylinder("BeamSaberControlStick_Grip", stickRoot.transform, Vector3.zero,
+                new Vector3(0.034f, 0.07f, 0.034f), stickMat);
+            GameObject capTop = CreateSphere("BeamSaberControlStick_TopCap", stickRoot.transform, new Vector3(0f, 0.072f, 0f),
+                new Vector3(0.038f, 0.02f, 0.038f), MakeEmissiveMat(new Color(0.5f, 0.1f, 0.3f), new Color(1f, 0.3f, 0.7f)));
+            StripCollider(capTop);
+            XRSimpleInteractable stickInteractable = grip.AddComponent<XRSimpleInteractable>();
+            Collider gripCol = grip.GetComponent<Collider>();
+            if (gripCol != null)
+            {
+                SerializedObject so = new SerializedObject(stickInteractable);
+                SerializedProperty cols = so.FindProperty("m_Colliders");
+                if (cols != null)
+                {
+                    cols.ClearArray();
+                    cols.InsertArrayElementAtIndex(0);
+                    cols.GetArrayElementAtIndex(0).objectReferenceValue = gripCol;
+                    so.ApplyModifiedProperties();
+                }
+            }
+            stick.interactable = stickInteractable;
+            stick.hand = rightHand;
+            stick.onlyAllowedInteractor = rightNearFar;
+            stick.halfLength = 0.07f;
+            if (rightNearFar == null) stickInteractable.enabled = false; // no XRI rig: right-hand grip fallback only
+            modes.saberStick = stick;
+
+            // --- Real Gundam right arm + saber ---
+            GameObject gundam = gundamResult != null ? gundamResult.instance : null;
+            if (gundam != null)
+            {
+                Transform upper = FindDeepChild(gundam.transform, "RightArm");
+                Transform fore = FindDeepChild(gundam.transform, "RightForeArm");
+                Transform handBone = FindDeepChild(gundam.transform, "RightHand");
+                Transform shoulder = FindDeepChild(gundam.transform, "RightShoulder");
+                if (upper != null && fore != null && handBone != null)
+                {
+                    SkinnedMeshRenderer armView = BuildGundamRightArmView(gundam,
+                        new[] { "RightShoulder", "RightArm", "RightForeArm", "RightHand" });
+                    Transform saber = BuildBeamSaber(handBone);
+
+                    BeamSaberArmController arm = gundam.AddComponent<BeamSaberArmController>();
+                    arm.upperArm = upper;
+                    arm.foreArm = fore;
+                    arm.handBone = handBone;
+                    arm.armView = armView;
+                    arm.saber = saber;
+                    arm.stick = stick;
+                    arm.cockpitSpace = interior.transform;
+                    arm.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+                    Camera cam = xrOrigin != null ? xrOrigin.GetComponentInChildren<Camera>(true) : null;
+                    if (cam != null) arm.pilotHead = cam.transform;
+                    modes.saberArm = arm;
+                    Debug.Log("[Gundam] BEAM SABER: arm bones " + upper.name + " > " + fore.name + " > " + handBone.name +
+                        (shoulder != null ? " (shoulder " + shoulder.name + ")" : "") + ", saber on " + handBone.name + ".");
+                }
+                else
+                {
+                    Debug.LogWarning("[Gundam] BEAM SABER: RightArm/RightForeArm/RightHand bones not found - arm control disabled.");
+                }
+            }
+
+            // --- WEAPON display touch buttons ---
+            Transform weaponCanvas = interior.transform.Find("SystemCheckDisplay/SysCheck_Right/Weapon_Canvas");
+            if (weaponCanvas == null)
+            {
+                Debug.LogWarning("[Gundam] BEAM SABER: Weapon_Canvas not found - no touch buttons.");
+                return;
+            }
+            Text current = CreateUIText("CurrentWeapon", weaponCanvas, new Vector2(0, -50), new Vector2(340, 18), 14,
+                TextAnchor.MiddleCenter, new Color(0.6f, 0.9f, 1f), "SELECT: BEAM RIFLE");
+            WeaponTouchPanel.TouchButton rifleBtn = BuildTouchButton(weaponCanvas, "Btn_BeamRifle", "BEAM RIFLE",
+                new Vector2(0, -95), WeaponModeController.Mode.BeamRifle);
+            WeaponTouchPanel.TouchButton saberBtn = BuildTouchButton(weaponCanvas, "Btn_BeamSaber", "BEAM SABER",
+                new Vector2(0, -183), WeaponModeController.Mode.BeamSaber);
+
+            WeaponTouchPanel panel = weaponCanvas.gameObject.AddComponent<WeaponTouchPanel>();
+            panel.weapons = modes;
+            panel.leftHand = leftHand;
+            panel.rightHand = rightHand;
+            panel.buttons = new[] { rifleBtn, saberBtn };
+            panel.currentText = current;
+        }
+
+        // Display cluster size/placement - per "조종기 사이 공간에 들어올 사이즈로"
+        // (option "절반 크기 + 조종기 위로"). The cluster (built at full size by
+        // BuildSystemCheckDisplay) is scaled about the cockpit origin and then
+        // offset so the side screens' bottom edge sits DisplayBottomAboveGrip above
+        // the joystick grip balls' top - hands on the sticks pass underneath.
+        const float DisplayClusterScale = 0.5f;
+        const float DisplayBottomAboveGrip = 0.08f; // clear of the knuckles on the grip
+        const float DisplayCenterScreenZ = 0.40f;   // keep the center screen where it was reachable
+
+        static void ShrinkSystemCheckDisplay(Transform interior)
+        {
+            Transform root = interior.Find("SystemCheckDisplay");
+            if (root == null) return;
+            float s = DisplayClusterScale;
+
+            // Measure (at full size) the side screens' bottom and the center screen depth.
+            Transform center = root.Find("SysCheck_Center");
+            float sideBottom = float.MaxValue;
+            foreach (string n in new[] { "SysCheck_Left", "SysCheck_Right" })
+            {
+                Transform t = root.Find(n);
+                if (t == null) continue;
+                foreach (Renderer r in t.GetComponentsInChildren<Renderer>(true))
+                    sideBottom = Mathf.Min(sideBottom, interior.InverseTransformPoint(r.bounds.min).y);
+            }
+            if (sideBottom == float.MaxValue) sideBottom = 0.79f;
+
+            // Top of the joystick grips (highest renderer of either stick).
+            float gripTop = 0.94f;
+            foreach (string n in new[] { "LeftJoystick_Mount", "RightJoystick_Mount" })
+            {
+                Transform t = interior.Find(n);
+                if (t == null) continue;
+                foreach (Renderer r in t.GetComponentsInChildren<Renderer>(true))
+                    gripTop = Mathf.Max(gripTop, interior.InverseTransformPoint(r.bounds.max).y);
+            }
+
+            float centerZ = center != null ? center.localPosition.z : 0.48f;
+            Vector3 offset = new Vector3(0f,
+                gripTop + DisplayBottomAboveGrip - s * sideBottom,
+                DisplayCenterScreenZ - s * centerZ);
+
+            root.localScale = Vector3.one * s;
+            root.localPosition = offset;
+
+            // The two tick ladders flanking the screens are separate objects - move/scale them the same way.
+            foreach (string n in new[] { "SysCheck_TickLadder_L", "SysCheck_TickLadder_R" })
+            {
+                Transform t = interior.Find(n);
+                if (t == null) continue;
+                t.localPosition = offset + t.localPosition * s;
+                t.localScale = t.localScale * s;
+            }
+            Debug.Log("[Gundam] SystemCheckDisplay scaled x" + s + ", offset " + offset.ToString("F3") +
+                " (side screens now start " + DisplayBottomAboveGrip + "m above the grips at y " + gripTop.ToString("F2") + ").");
+        }
+
+        static WeaponTouchPanel.TouchButton BuildTouchButton(Transform canvas, string name, string label, Vector2 pos,
+            WeaponModeController.Mode mode)
+        {
+            Vector2 size = new Vector2(340, 72); // taller so it stays finger-sized after the display cluster is halved
+            Image bg = CreateUIImage(name, canvas, pos, size, new Color(0.08f, 0.12f, 0.2f, 0.95f));
+            Text t = CreateUIText(name + "_Label", bg.transform, Vector2.zero, size, 24, TextAnchor.MiddleCenter,
+                new Color(0.75f, 0.85f, 1f), label);
+            return new WeaponTouchPanel.TouchButton { mode = mode, rect = bg.rectTransform, background = bg, label = t };
+        }
+
+        /// <summary>A second SkinnedMeshRenderer on the Gundam that draws ONLY the triangles
+        /// of the real Gundam mesh whose vertices are all mainly weighted to the given bones,
+        /// skinned to the same real bone array - so the real right arm can be shown while the
+        /// rest of the (pilot's own) body stays hidden. Mesh cached as an asset.</summary>
+        static SkinnedMeshRenderer BuildGundamRightArmView(GameObject gundam, string[] boneNames)
+        {
+            SkinnedMeshRenderer src = gundam.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                .FirstOrDefault(r => r.sharedMesh != null && r.gameObject.name != "GundamRightArm_View");
+            if (src == null) return null;
+            UnityEngine.Mesh m = src.sharedMesh;
+            Transform[] bones = src.bones;
+            var keep = new System.Collections.Generic.HashSet<int>();
+            for (int i = 0; i < bones.Length; i++) if (bones[i] != null && boneNames.Contains(bones[i].name)) keep.Add(i);
+
+            BoneWeight[] bw = m.boneWeights;
+            int[] tris = m.triangles;
+            Vector3[] verts = m.vertices;
+            Vector3[] norms = m.normals;
+            Vector4[] tans = m.tangents;
+            Vector2[] uv = m.uv;
+            int[] remap = new int[verts.Length];
+            for (int i = 0; i < remap.Length; i++) remap[i] = -1;
+            var nv = new System.Collections.Generic.List<Vector3>();
+            var nn = new System.Collections.Generic.List<Vector3>();
+            var nt = new System.Collections.Generic.List<Vector4>();
+            var nu = new System.Collections.Generic.List<Vector2>();
+            var nw = new System.Collections.Generic.List<BoneWeight>();
+            var ntri = new System.Collections.Generic.List<int>();
+            for (int t = 0; t < tris.Length; t += 3)
+            {
+                int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+                if (!keep.Contains(bw[a].boneIndex0) || !keep.Contains(bw[b].boneIndex0) || !keep.Contains(bw[c].boneIndex0)) continue;
+                foreach (int v in new[] { a, b, c })
+                {
+                    if (remap[v] < 0)
+                    {
+                        remap[v] = nv.Count;
+                        nv.Add(verts[v]);
+                        if (norms.Length == verts.Length) nn.Add(norms[v]);
+                        if (tans.Length == verts.Length) nt.Add(tans[v]);
+                        if (uv.Length == verts.Length) nu.Add(uv[v]);
+                        nw.Add(bw[v]);
+                    }
+                    ntri.Add(remap[v]);
+                }
+            }
+
+            UnityEngine.Mesh arm = new UnityEngine.Mesh { name = "GundamRightArm_View" };
+            if (nv.Count > 65000) arm.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            arm.SetVertices(nv);
+            if (nn.Count == nv.Count) arm.SetNormals(nn);
+            if (nt.Count == nv.Count) arm.SetTangents(nt);
+            if (nu.Count == nv.Count) arm.SetUVs(0, nu);
+            arm.boneWeights = nw.ToArray();
+            arm.bindposes = m.bindposes;
+            arm.SetTriangles(ntri, 0);
+            arm.RecalculateBounds();
+
+            UnityEngine.Mesh existing = AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(GundamRightArmMeshPath);
+            if (existing != null) AssetDatabase.DeleteAsset(GundamRightArmMeshPath);
+            AssetDatabase.CreateAsset(arm, GundamRightArmMeshPath);
+
+            GameObject go = new GameObject("GundamRightArm_View");
+            go.transform.SetParent(src.transform.parent, false);
+            go.transform.localPosition = src.transform.localPosition;
+            go.transform.localRotation = src.transform.localRotation;
+            go.transform.localScale = src.transform.localScale;
+            go.layer = 0; // visible to HeadCam (the body itself stays on GundamBodyLayer)
+            SkinnedMeshRenderer smr = go.AddComponent<SkinnedMeshRenderer>();
+            smr.sharedMesh = arm;
+            smr.bones = bones;
+            smr.rootBone = src.rootBone;
+            smr.sharedMaterials = src.sharedMaterials;
+            smr.updateWhenOffscreen = true;
+            smr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            smr.enabled = false; // shown only in BEAM SABER mode
+            Debug.Log("[Gundam] GundamRightArm_View: " + nv.Count + " verts / " + (ntri.Count / 3) + " tris from bones " + string.Join(", ", boneNames));
+            return smr;
+        }
+
+        /// <summary>The downloaded beam saber hilt (with its own base-color texture) plus a
+        /// glowing beam blade, parented to the Gundam's RightHand bone. The root's +Y is the
+        /// blade direction; BeamSaberArmController sets its world pose every frame.</summary>
+        static Transform BuildBeamSaber(Transform handBone)
+        {
+            GameObject root = new GameObject("BeamSaber");
+            root.transform.SetParent(handBone, false);
+            float ls = handBone.lossyScale.x > 0.0001f ? 1f / handBone.lossyScale.x : 1f;
+            root.transform.localScale = Vector3.one * ls; // 1 unit = 1 m in world
+            root.layer = 0;
+
+            float hiltLen = BeamSaberHiltLength;
+            GameObject hiltAsset = AssetDatabase.LoadAssetAtPath<GameObject>(BeamSaberHiltPath);
+            if (hiltAsset != null)
+            {
+                GameObject hilt = (GameObject)PrefabUtility.InstantiatePrefab(hiltAsset);
+                hilt.name = "BeamSaber_Hilt";
+                hilt.transform.SetParent(root.transform, false);
+                // The hilt model's long axis is its local Z - turn it onto +Y (blade axis).
+                hilt.transform.localRotation = Quaternion.Euler(-90f, 0f, 0f);
+                hilt.transform.localPosition = Vector3.zero;
+                hilt.transform.localScale = Vector3.one;
+                Renderer[] rs = hilt.GetComponentsInChildren<Renderer>(true);
+                if (rs.Length > 0)
+                {
+                    Bounds b = rs[0].bounds;
+                    foreach (Renderer r in rs) b.Encapsulate(r.bounds);
+                    float longest = Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z));
+                    float s = longest > 0.0001f ? hiltLen / longest : 1f;
+                    hilt.transform.localScale = Vector3.one * (s / Mathf.Max(0.0001f, root.transform.lossyScale.x));
+                    Vector3 off = root.transform.InverseTransformPoint(b.center) * s;
+                    hilt.transform.localPosition = -off; // center the hilt on the grip point
+                }
+                Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(BeamSaberHiltTexturePath);
+                Material hiltMat = MakeMat(Color.white);
+                hiltMat.name = "BeamSaberHilt";
+                if (tex != null) hiltMat.mainTexture = tex;
+                foreach (Renderer r in rs)
+                {
+                    Material[] mats = r.sharedMaterials;
+                    for (int i = 0; i < mats.Length; i++) mats[i] = hiltMat;
+                    r.sharedMaterials = mats;
+                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                }
+                SetLayerRecursively(hilt, 0);
+                foreach (Collider c in hilt.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Beam saber hilt model not found at " + BeamSaberHiltPath + " - using a plain grip.");
+                GameObject plain = CreateCylinder("BeamSaber_Hilt", root.transform, Vector3.zero,
+                    new Vector3(0.35f, hiltLen * 0.5f, 0.35f), MakeMat(new Color(0.8f, 0.8f, 0.82f)));
+                StripCollider(plain);
+                plain.layer = 0;
+            }
+
+            // Beam blade: bright emissive core + slightly wider glow shell.
+            Material core = MakeEmissiveMat(new Color(1f, 0.85f, 0.95f), new Color(4f, 2.2f, 3.2f));
+            Material glow = MakeEmissiveMat(new Color(1f, 0.2f, 0.6f), new Color(3f, 0.4f, 1.6f));
+            float bladeY = hiltLen * 0.5f + BeamSaberBladeLength * 0.5f;
+            GameObject blade = CreateCylinder("BeamSaber_Blade", root.transform, new Vector3(0f, bladeY, 0f),
+                new Vector3(BeamSaberBladeRadius * 2f, BeamSaberBladeLength * 0.5f, BeamSaberBladeRadius * 2f), glow);
+            StripCollider(blade);
+            blade.layer = 0;
+            GameObject coreGo = CreateCylinder("BeamSaber_Core", root.transform, new Vector3(0f, bladeY, 0f),
+                new Vector3(BeamSaberBladeRadius, BeamSaberBladeLength * 0.5f + 0.05f, BeamSaberBladeRadius), core);
+            StripCollider(coreGo);
+            coreGo.layer = 0;
+            GameObject tip = CreateSphere("BeamSaber_Tip", root.transform, new Vector3(0f, hiltLen * 0.5f + BeamSaberBladeLength, 0f),
+                Vector3.one * BeamSaberBladeRadius * 2f, glow);
+            StripCollider(tip);
+            tip.layer = 0;
+            foreach (Renderer r in root.GetComponentsInChildren<Renderer>(true)) r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+
+            root.SetActive(false); // shown only in BEAM SABER mode
+            return root.transform;
+        }
+
         // ---------------------------------------------------------------
         // Distant space wreckage - per "우주에 건물을 넣을려고 하는데 우주에
         // 잔해같은거 거슬리지 않게" (placement option "멀리 배경으로"). Uses every
@@ -1454,7 +1818,9 @@ namespace Gundam.EditorTools
             // meridian bows + one equatorial ring, built from short beam
             // segments since Unity has no curved primitive) - like a real
             // canopy's frame bars over its glass/screen panes.
-            Material canopyFrameMat = MakeEmissiveMat(new Color(0.05f, 0.05f, 0.06f), new Color(0.08f, 0.1f, 0.14f));
+            // Per "콕핏 태두리선을 더얇게하고 아주조금 빛나게해줘": a faint cool glow
+            // (was an almost-black 0.08/0.1/0.14 emission).
+            Material canopyFrameMat = MakeEmissiveMat(new Color(0.05f, 0.06f, 0.08f), new Color(0.18f, 0.3f, 0.42f));
             BuildCanopyFrame(interior, domeCenter, domeScale * 0.5f, canopyFrameMat);
         }
 
@@ -1468,9 +1834,15 @@ namespace Gundam.EditorTools
             frameRoot.transform.SetParent(interior, false);
 
             const int ribCount = 6;       // meridian bows, 30 degrees apart (each covers both sides of the sphere)
-            const int meridianSegments = 20;
-            const int equatorSegments = 24;
-            const float beamThickness = 0.025f;
+            // More, shorter segments + pulled slightly INSIDE the dome - per "선이 끈어진거
+            // 없이": the old 20/24-segment chords had their ends exactly ON the opaque dome
+            // surface, so the dome hid the beam near every joint and the lines looked dashed.
+            const int meridianSegments = 48;
+            const int equatorSegments = 48;
+            const float beamThickness = 0.012f; // was 0.025 - thinner per "태두리선을 더얇게"
+            const float insetFromDome = 0.02f;   // keeps every segment fully in front of the dome
+            float minRadius = Mathf.Max(0.1f, Mathf.Min(domeRadii.x, Mathf.Min(domeRadii.y, domeRadii.z)));
+            float inset = 1f - insetFromDome / minRadius;
 
             for (int r = 0; r < ribCount; r++)
             {
@@ -1480,7 +1852,7 @@ namespace Gundam.EditorTools
                 {
                     float phi = s * (360f / meridianSegments) * Mathf.Deg2Rad;
                     Vector3 unit = new Vector3(Mathf.Sin(phi) * Mathf.Cos(theta), Mathf.Cos(phi), Mathf.Sin(phi) * Mathf.Sin(theta));
-                    Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii);
+                    Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii) * inset;
 
                     if (s > 0)
                     {
@@ -1497,7 +1869,7 @@ namespace Gundam.EditorTools
             {
                 float phi = s * (360f / equatorSegments) * Mathf.Deg2Rad;
                 Vector3 unit = new Vector3(Mathf.Cos(phi), 0f, Mathf.Sin(phi));
-                Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii);
+                Vector3 point = domeCenterLocal + Vector3.Scale(unit, domeRadii) * inset;
 
                 if (s > 0)
                 {
@@ -2994,7 +3366,8 @@ namespace Gundam.EditorTools
             Vector3 mid = (a + b) * 0.5f;
             Vector3 dir = b - a;
             float len = dir.magnitude;
-            GameObject go = CreateCube(name, parent, mid, new Vector3(thickness, thickness, Mathf.Max(len, 0.001f)), mat);
+            // +thickness so neighbouring segments overlap at the joints (no hairline gaps).
+            GameObject go = CreateCube(name, parent, mid, new Vector3(thickness, thickness, Mathf.Max(len + thickness, 0.001f)), mat);
             if (len > 0.0001f) go.transform.localRotation = Quaternion.LookRotation(dir.normalized);
             return go;
         }

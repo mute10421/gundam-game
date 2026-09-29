@@ -140,6 +140,9 @@ namespace Gundam.Cockpit
             {
                 Transform c = _candidates[i];
                 if (c == null || !c.gameObject.activeInHierarchy) continue;
+                // Destroyed enemies (EnemyHealth, waiting to respawn) can't be locked.
+                EnemyHealth hp = c.GetComponent<EnemyHealth>();
+                if (hp != null && hp.IsDead) continue;
                 if (!TryProject(c, out Vector2 center, out float radius)) continue;
                 float limit = ringRadius * (c == CurrentTarget ? releaseRadiusFactor : captureRadiusFactor);
                 float off = center.magnitude;

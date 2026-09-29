@@ -126,7 +126,13 @@ namespace Gundam.Cockpit
         // HUD-facing ammo count here tracks SHOTS, not individual rounds, and
         // maxAmmo = 60 shots x 2 rounds/shot = 120 rounds total, matching the
         // spec exactly.
-        [Header("Ammo / HUD status (does not gate or change firing)")]
+        [Header("Damage")]
+        [Tooltip("Damage dealt by EACH round that hits an enemy (EnemyHealth) - per request (\"해드 발칸에 데미지는 1이야\"). Both muzzles fire together, so one shot can land up to 2 rounds.")]
+        public int damage = 1;
+
+        [Header("Ammo / HUD status")]
+        [Tooltip("UPDATE per \"발칸이 재장전될떄는 안나가야함\": when on (default), the vulcan can't fire while EMPTY or RELOADING - ammo now DOES gate firing (the note above describes the original, un-gated behavior, which this switch turns back on when off).")]
+        public bool blockFireWhenNotReady = true;
         public string weaponName = "HEAD VULCAN";
         public int maxAmmo = 60;
         [Tooltip("Seconds the HUD shows EMPTY before automatically switching to RELOADING.")]
@@ -371,7 +377,11 @@ namespace Gundam.Cockpit
             bool buttonFire = fireButtons != null && fireButtons.ThumbPressed;
             bool bendFire = (fireOnThumbBend || fireButtons == null)
                 && _thumbTracked && _thumbBendAmount >= thumbBendThreshold;
-            if ((buttonFire || bendFire) && _cooldownTimer <= 0f)
+            // Per "발칸이 재장전될떄는 안나가야함": no shots while EMPTY or
+            // RELOADING (the old never-gated behavior is kept behind
+            // blockFireWhenNotReady = false).
+            bool ammoReady = !blockFireWhenNotReady || (State == FireReadyState.Ready && CurrentAmmo > 0);
+            if ((buttonFire || bendFire) && _cooldownTimer <= 0f && ammoReady)
             {
                 Fire();
                 _cooldownTimer = fireRate;
@@ -522,6 +532,16 @@ namespace Gundam.Cockpit
             if (rb == null) rb = go.AddComponent<Rigidbody>();
             rb.useGravity = false;
             rb.linearVelocity = fireDirection * bulletSpeed;
+
+            // Hit detection + damage (see HeadVulcanBullet): sweeps the tracer
+            // tip's path each frame from the muzzle onward.
+            HeadVulcanBullet hitter = go.GetComponent<HeadVulcanBullet>();
+            if (hitter == null) hitter = go.AddComponent<HeadVulcanBullet>();
+            hitter.damage = damage;
+            hitter.direction = fireDirection;
+            hitter.tipOffset = projectilePrefab != null ? 0f : tracerLength * 0.5f;
+            hitter.hitEffectMaterial = bulletMat;
+            hitter.Begin(muzzle.position);
 
             Destroy(go, bulletLifetime);
 

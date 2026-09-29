@@ -25,6 +25,8 @@ namespace Gundam.Cockpit
         public JoystickLever leftStick;
         public JoystickLever rightStick;
         public Text infoText;
+        [Tooltip("Optional - shows altitude / vertical speed from the T lever on the HEADING line.")]
+        public VerticalThrustController vertical;
 
         [Header("Speed / status (added for the 3-display Cockpit HUD)")]
         public ShipMovementController ship;
@@ -49,10 +51,14 @@ namespace Gundam.Cockpit
 
                 float headingDeg = ship != null ? NormalizeDegrees(ship.HeadingYaw) : 0f;
 
+                // ALT / vertical speed from the T lever (VerticalThrustController),
+                // appended to the HEADING line so the panel keeps its 3 lines.
+                string alt = vertical != null ? $"   ALT {vertical.Altitude:0}m {vertical.CurrentVerticalSpeed:+0.0;-0.0;0.0}" : "";
+                if (vertical != null && vertical.lever != null && vertical.lever.IsGrabbed) alt += $" [T {vertical.lever.VerticalInput:+0.0;-0.0;0.0}]";
                 infoText.text =
                     "GUNDAM COCKPIT\n" +
                     $"THROTTLE {l.y * 100f:0}%   TURN {l.x * 100f:0}%\n" +
-                    $"HEADING {headingDeg:000}°" +
+                    $"HEADING {headingDeg:000}°" + alt +
                     (leftStick != null && leftStick.isGrabbed ? "  [L GRIP]" : "");
             }
 

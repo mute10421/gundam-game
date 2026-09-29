@@ -45,6 +45,8 @@ namespace Gundam.EditorTools
         // for the enemy Zaku so it reads at the same scale as the player's
         // own Gundam rather than needing its own separately-tuned number.
         const float MobileSuitTargetHeight = 18f;
+        // ZakuEnemy's starting Z (ExternalGundam stands at Z=20 -> 80m apart).
+        const float ZakuSpawnZ = 100f;
 
         // An unnamed layer index used ONLY to hide ExternalGundam's own body
         // from the player's own (XR) camera - see PlaceExternalGundam (sets
@@ -54,6 +56,25 @@ namespace Gundam.EditorTools
         // default, so it's very unlikely to collide with anything else in
         // this project.
         const int GundamBodyLayer = 30;
+
+        // The reverse of GundamBodyLayer: the whole CockpitInterior (seat, dome,
+        // frame, displays, joysticks, OrbitHUD...) goes on this unnamed layer and
+        // is excluded from HeadCam only - per "콕핏트가 내가 건담 안에서 보이거든
+        // 밖에 있는 콕피트가 이거 안보이게해야함". The cockpit physically sits at
+        // MobileSuitRoot (the origin), ~20m from ExternalGundam's head, so HeadCam
+        // - which renders the exterior view on Cockpit_Dome - was filming the
+        // cockpit itself as an object floating outside. The pilot's own XR camera
+        // still renders this layer (its mask only drops GundamBodyLayer). The
+        // joysticks' grab colliders are NOT moved (XRI hand grab only scans
+        // Default) - see SetLayerRecursivelyExceptColliders.
+        const int CockpitInteriorLayer = 29;
+
+        // SpaceDustField (the endless star/dust field) lives on this unnamed layer,
+        // which only the pilot's own XR camera skips - it's sealed inside the
+        // opaque Cockpit_Dome, so this changes nothing it would otherwise show, but
+        // dust drifting through the cockpit's position can't float INSIDE the
+        // cockpit. HeadCam (the exterior view on the dome) still renders it.
+        const int SpaceBackdropLayer = 28;
 
         // XR Hands package's official "HandVisualizer" sample (Window >
         // Package Manager > XR Hands > Samples > HandVisualizer) - imported
@@ -149,7 +170,8 @@ namespace Gundam.EditorTools
             }
 
             // --- Enemy Zaku - per request ("자쿠를 적으로 배치해줘") ---
-            PlaceZakuEnemy();
+            // Passed the player's Gundam so its ZakuCombatAI knows what to face/circle.
+            PlaceZakuEnemy(gundamResult != null && gundamResult.instance != null ? gundamResult.instance.transform : null);
 
             // --- Full 360-degree solid enclosure (floor + an inward-facing
             //     curved dome) so the real room/Skybox is never visible in
@@ -228,6 +250,19 @@ namespace Gundam.EditorTools
 
             ship.leftStick = leftStick;
 
+            // --- Separate T-shaped VERTICAL lever (rise/descend), left hand,
+            //     at seated shoulder height - per "새로운 수직 이동 T자 레버" /
+            //     "어깨 높이를 기준으로 배치". See CreateVerticalTLever and
+            //     VerticalTLever.cs. LeftJoystick/RightJoystick are untouched. ---
+            VerticalTLever verticalLever = CreateVerticalTLever(interior.transform, leftHand, leftStick, leftAccentMat, buttonGreenMat);
+
+            // Lever -> actual rise/descend (per "레버를 앞으로 올리면 건담이 위로
+            // 날아야 하는데"): a separate component on the same MobileSuitRoot
+            // that only adds vertical motion - ShipMovementController untouched.
+            VerticalThrustController verticalThrust = suitRoot.AddComponent<VerticalThrustController>();
+            verticalThrust.lever = verticalLever;
+            verticalThrust.maxClimbSpeed = ship.maxMoveSpeed; // same top speed as horizontal
+
             // --- Gun turret (mounted on the suit, aimed by the right stick) ---
             // Per report ("눈앞에있는 막대기로 만들어친 총열같이 생긴놈을
             // 지우고"): the turret's own visible meshes (GunHousing/Barrel -
@@ -268,6 +303,7 @@ namespace Gundam.EditorTools
             // deleted, so WeaponAimFireController itself is completely
             // untouched and still fully functional if ever wired up again.
             hud.ship = ship;
+            hud.vertical = verticalThrust;
             hud.hudManager = hudManager;
             hud.speedText = speedText;
             hud.statusText = statusText;
@@ -307,6 +343,7 @@ namespace Gundam.EditorTools
             //     doesn't exist yet when the joysticks are built. See
             //     AttachHandInteractable below for what this actually adds. ---
             WireJoystickHandInteractors(xrOrigin, leftStick, rightStick);
+            WireVerticalLeverInteractor(xrOrigin, verticalLever);
 
             // Wire the pilot's own view camera into the Gundam's head-turn
             // tracking, now that CreateXROrigin has actually created it - per
@@ -558,6 +595,35 @@ namespace Gundam.EditorTools
                 if (col != null) UnityEngine.Object.DestroyImmediate(col);
             }
 
+            // --- Endless star/space-dust field around HeadCam - per "배경에 별들이
+            //     더 있어야할거같아 움직이는게 안느겨져서" (see SpaceDustField). The
+            //     Starfield above is kept; this adds near parallax dust that streams
+            //     past as the suit moves, plus a dense far star sky. ---
+            GameObject dustRoot = new GameObject("SpaceDust");
+            dustRoot.layer = SpaceBackdropLayer;
+            SpaceDustField dust = dustRoot.AddComponent<SpaceDustField>();
+            dust.material = starMat;
+            if (gundamResult != null && gundamResult.headCam360 != null && gundamResult.headCam360.headCam != null)
+            {
+                dust.viewer = gundamResult.headCam360.headCam.transform;
+            }
+
+            // --- Distant space wreckage (VARCO 3D models in Assets/Models/Debris) -
+            //     per "우주에 건물을 넣을려고 하는데 우주에 잔해같은거 거슬리지 않게"
+            //     (see PlaceSpaceDebris / SpaceDebrisField). ---
+            PlaceSpaceDebris(dust.viewer);
+
+            // Hide the cockpit from HeadCam's exterior view (see CockpitInteriorLayer).
+            // Done last so every object built under CockpitInterior above is included.
+            // Only CockpitInterior - the XR Origin (hands etc.) keeps its own layers.
+            // FIX (per "갑자기 조종관이 안잡힘"): the joysticks' grab colliders
+            // (grip balls, finger buttons, trigger - colliders under an XR
+            // interactable) stay on Default - the hands' XRI Near-Far interactor only looks for
+            // grab colliders on the Default layer (its near caster's physics mask
+            // is Default only), so moving them to CockpitInteriorLayer made the
+            // sticks ungrabbable. The XR rig's own settings are left untouched.
+            SetLayerRecursivelyExceptColliders(interior, CockpitInteriorLayer);
+
             System.IO.Directory.CreateDirectory("Assets/Scenes");
             EditorSceneManager.SaveScene(scene, ScenePath);
             AddSceneToBuildSettings(ScenePath);
@@ -686,8 +752,17 @@ namespace Gundam.EditorTools
             //
             // Scale: target a canonical mecha height of ~18m (RX-78-2-scale
             // Gundam) from that raw 0.985-unit height.
+            //
+            // FIX per report ("건담이랑 자쿠에 사이즈가 같아야해 건담이 너무
+            // 큰거같아"): that hardcoded raw height was wrong for how Unity
+            // actually imports this FBX - measured in the built scene, the
+            // Gundam came out 21.0 m tall while ZakuEnemy (scaled from its own
+            // measured bounds) is exactly 18.0 m. Now the Gundam is scaled the
+            // SAME way as the Zaku: from its own rendered bounds at scale 1, to
+            // the shared MobileSuitTargetHeight - so both always match. The old
+            // raw-height value is only a fallback if the mesh can't be measured.
             const float rawHeight = 0.985469f;
-            const float targetHeight = 18f;
+            float targetHeight = MobileSuitTargetHeight;
             float scale = targetHeight / rawHeight;
 
             // Standing distance: clearly outside the Cockpit_Dome (its front
@@ -697,6 +772,26 @@ namespace Gundam.EditorTools
             // ahead of the pilot without overlapping the cockpit or camera.
             instance.transform.position = new Vector3(0f, 0f, 20f);
             instance.transform.rotation = Quaternion.identity;
+            //
+            // CORRECTION per follow-up ("지금 크기가 머리하나는 차이 나는데?"):
+            // the renderer-bounds approach above was itself the bug. A
+            // SkinnedMeshRenderer's bounds are a loose, padded box - checked in
+            // the Editor, at scale 1 the Gundam's box is 1.150 tall and the
+            // Zaku's 1.253, while their ACTUAL vertices span 0.9855 and 0.9804.
+            // The padding differs per model, so "18 m by bounds" left the
+            // Gundam's real body at 15.4 m and the Zaku's at 14.1 m. Both are
+            // now scaled by their real vertex height (MeasureMeshHeight) to
+            // MobileSuitTargetHeight, so both bodies really are 18 m.
+            instance.transform.localScale = Vector3.one;
+            float measuredHeight = MeasureMeshHeight(instance);
+            if (measuredHeight > 0.0001f)
+            {
+                scale = targetHeight / measuredHeight;
+            }
+            else
+            {
+                Debug.LogWarning("[Gundam] Could not measure ExternalGundam's mesh - falling back to the raw-height scale.");
+            }
             instance.transform.localScale = Vector3.one * scale;
 
             // Hide this body from the pilot's own DIRECT first-person view -
@@ -806,6 +901,10 @@ namespace Gundam.EditorTools
             // view AND in this self-view feed (and by extension the 360
             // skybox/Cockpit_Dome background it also drives, further below).
             headCam.cullingMask &= ~(1 << GundamBodyLayer);
+            // ...and never the cockpit interior either (see CockpitInteriorLayer).
+            headCam.cullingMask &= ~(1 << CockpitInteriorLayer);
+            // Far enough for the distant wreckage (up to ~900m) and far stars.
+            headCam.farClipPlane = Mathf.Max(headCam.farClipPlane, 2000f);
 
             Debug.Log("[Gundam] Head camera attached to the '" + head.name + "' bone, feeding RenderTexture at " +
                 HeadCamRenderTexturePath + ".");
@@ -866,7 +965,111 @@ namespace Gundam.EditorTools
         // Same defensive "not imported yet" handling as PlaceExternalGundam
         // above (never fails the rest of the scene build).
         // ---------------------------------------------------------------
-        static void PlaceZakuEnemy()
+        // ---------------------------------------------------------------
+        // Distant space wreckage - per "우주에 건물을 넣을려고 하는데 우주에
+        // 잔해같은거 거슬리지 않게" (placement option "멀리 배경으로"). Uses every
+        // model in DebrisModelFolder (the VARCO 3D generated colony / station /
+        // battleship pieces), placed in a ring 450-750m out around the combat area
+        // so they never block the fight, scaled to 140-300m, slightly dimmed so
+        // they read as background, no colliders/shadows, on SpaceBackdropLayer.
+        // SpaceDebrisField keeps them drifting past slowly and tumbling.
+        // Missing folder/models = skipped with a warning (never fails the build).
+        // ---------------------------------------------------------------
+        const string DebrisModelFolder = "Assets/Models/Debris";
+
+        static void PlaceSpaceDebris(Transform viewer)
+        {
+            if (!AssetDatabase.IsValidFolder(DebrisModelFolder))
+            {
+                Debug.LogWarning("[Gundam] No '" + DebrisModelFolder + "' folder - skipping space wreckage.");
+                return;
+            }
+            string[] guids = AssetDatabase.FindAssets("t:Model", new[] { DebrisModelFolder });
+            GameObject[] models = guids
+                .Select(g => AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(g)))
+                .Where(m => m != null)
+                .OrderBy(m => m.name)
+                .ToArray();
+            if (models.Length == 0)
+            {
+                Debug.LogWarning("[Gundam] No models in '" + DebrisModelFolder + "' - skipping space wreckage.");
+                return;
+            }
+
+            // (azimuth deg, elevation deg, distance m, size m) around the combat
+            // area's center. Azimuth 0 = +Z (straight ahead at start).
+            Vector4[] spots =
+            {
+                new Vector4(35f, 12f, 560f, 260f),
+                new Vector4(105f, -16f, 650f, 180f),
+                new Vector4(160f, 9f, 500f, 150f),
+                new Vector4(215f, 24f, 720f, 300f),
+                new Vector4(275f, -9f, 580f, 200f),
+                new Vector4(330f, -26f, 620f, 160f),
+            };
+            Vector3 center = new Vector3(0f, 10f, 40f);
+
+            GameObject root = new GameObject("SpaceDebris");
+            root.layer = SpaceBackdropLayer;
+            System.Random rnd = new System.Random(4242);
+
+            for (int i = 0; i < spots.Length; i++)
+            {
+                Vector4 s = spots[i];
+                GameObject model = models[i % models.Length];
+                Quaternion dirRot = Quaternion.Euler(-s.y, s.x, 0f);
+
+                // Pivot at the piece's visual center, so it tumbles in place.
+                GameObject pivot = new GameObject("Debris_" + i + "_" + model.name);
+                pivot.layer = SpaceBackdropLayer;
+                pivot.transform.SetParent(root.transform, false);
+                pivot.transform.position = center + dirRot * Vector3.forward * s.z;
+                pivot.transform.rotation = Quaternion.Euler((float)rnd.NextDouble() * 360f, (float)rnd.NextDouble() * 360f, (float)rnd.NextDouble() * 360f);
+
+                GameObject inst = (GameObject)PrefabUtility.InstantiatePrefab(model);
+                inst.transform.SetParent(pivot.transform, false);
+                inst.transform.localPosition = Vector3.zero;
+                inst.transform.localRotation = Quaternion.identity;
+                inst.transform.localScale = Vector3.one;
+                SetLayerRecursively(inst, SpaceBackdropLayer);
+                foreach (Collider c in inst.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+
+                Renderer[] rends = inst.GetComponentsInChildren<Renderer>(true);
+                if (rends.Length == 0) continue;
+                Bounds b = rends[0].bounds;
+                for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+                float maxDim = Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z));
+                float scale = maxDim > 0.0001f ? s.w / maxDim : 1f;
+                inst.transform.localScale = Vector3.one * scale;
+                // Re-center: move the model so its bounds center sits on the pivot.
+                Vector3 centerOffset = pivot.transform.InverseTransformPoint(b.center) * scale;
+                inst.transform.localPosition = -centerOffset;
+
+                foreach (Renderer r in rends)
+                {
+                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    r.receiveShadows = false;
+                    Material[] mats = r.sharedMaterials;
+                    for (int m = 0; m < mats.Length; m++)
+                    {
+                        if (mats[m] == null) continue;
+                        // Own copy (never edit the imported/shared material), dimmed
+                        // so the wrecks sit back in the scene instead of popping.
+                        Material dim = new Material(mats[m]) { name = mats[m].name + " (Debris dim)" };
+                        if (dim.HasProperty("_BaseColor")) dim.SetColor("_BaseColor", dim.GetColor("_BaseColor") * 0.6f);
+                        else if (dim.HasProperty("_Color")) dim.SetColor("_Color", dim.GetColor("_Color") * 0.6f);
+                        mats[m] = dim;
+                    }
+                    r.sharedMaterials = mats;
+                }
+            }
+
+            SpaceDebrisField field = root.AddComponent<SpaceDebrisField>();
+            field.viewer = viewer;
+            Debug.Log("[Gundam] Placed " + spots.Length + " distant wreck pieces from " + models.Length + " model(s) in " + DebrisModelFolder + ".");
+        }
+
+        static void PlaceZakuEnemy(Transform playerGundam)
         {
             GameObject fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuModelPath);
             if (fbxAsset == null)
@@ -886,17 +1089,24 @@ namespace Gundam.EditorTools
             // overlapping. Facing back toward the player (180 degrees from
             // ExternalGundam/the cockpit's own forward) rather than facing
             // away.
-            instance.transform.position = new Vector3(0f, 0f, 40f);
+            // Moved from Z=40 (only 20m from ExternalGundam) to Z=100 - per
+            // "시작할떄 조금 거리가 있어야할거같아": starts 80m away, then
+            // ZakuCombatAI closes to its ~60m engagement distance.
+            instance.transform.position = new Vector3(0f, 0f, ZakuSpawnZ);
             instance.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
 
             // Scaled from the model's OWN actual imported bounds (whatever
             // raw scale this particular FBX ships at) to the same ~18m
             // mobile-suit-height convention ExternalGundam uses, rather than
             // a hardcoded number guessed without opening the file.
-            SkinnedMeshRenderer meshRenderer = instance.GetComponentInChildren<SkinnedMeshRenderer>();
-            if (meshRenderer != null && meshRenderer.bounds.size.y > 0.0001f)
+            // (Measured from the real vertices, not the padded renderer bounds -
+            // see the matching note in PlaceExternalGundam: "지금 크기가 머리하나는
+            // 차이 나는데?".)
+            instance.transform.localScale = Vector3.one;
+            float zakuMeasuredHeight = MeasureMeshHeight(instance);
+            if (zakuMeasuredHeight > 0.0001f)
             {
-                float scale = MobileSuitTargetHeight / meshRenderer.bounds.size.y;
+                float scale = MobileSuitTargetHeight / zakuMeasuredHeight;
                 instance.transform.localScale = Vector3.one * scale;
             }
             else
@@ -908,10 +1118,33 @@ namespace Gundam.EditorTools
             Texture2D zakuTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuTexturePath);
             ApplyBaseColorTexture(instance, zakuTexture, "ZakuEnemy");
 
-            // Tag only, for now - no AI/aiming/health/combat logic yet (see
-            // Gundam.Cockpit.EnemyMarker). Runtime behavior for this belongs
-            // in its own script file, not here, once it's actually needed.
+            // Enemy tag (see Gundam.Cockpit.EnemyMarker - OrbitHUDTargetLock uses it).
             instance.AddComponent<EnemyMarker>();
+
+            // --- Combat: hitbox, health, maneuvering - per request ("자쿠에게
+            // 움직임을 주고 체력을 1000으로 설정해줘 그리고 해드 발칸에 데미지는
+            // 1이야"). Runtime behavior lives in EnemyHealth / ZakuCombatAI /
+            // HeadVulcanBullet; this only adds and wires them. ---
+            // Hitbox: an upright capsule over the real body (root-local units -
+            // the root's own scale brings it to ~18m). Without a collider the
+            // Head Vulcan's rounds had nothing to hit.
+            float localHeight = zakuMeasuredHeight > 0.0001f ? zakuMeasuredHeight : 1f;
+            CapsuleCollider hitbox = instance.AddComponent<CapsuleCollider>();
+            hitbox.direction = 1; // Y
+            hitbox.height = localHeight;
+            hitbox.radius = localHeight * 0.22f;
+            hitbox.center = new Vector3(0f, localHeight * 0.5f, 0f);
+
+            EnemyHealth health = instance.AddComponent<EnemyHealth>();
+            health.maxHealth = 1000;
+            health.respawnDelay = 5f;
+            health.effectMaterial = MakeEmissiveMat(new Color(0.35f, 0.12f, 0.02f), new Color(1f, 0.5f, 0.1f));
+            health.barHeightAboveRoot = MobileSuitTargetHeight + 2f;
+            health.faceTowards = playerGundam;
+
+            ZakuCombatAI ai = instance.AddComponent<ZakuCombatAI>();
+            ai.target = playerGundam;
+            ai.preferredDistance = 60f;
 
             Debug.Log("[Gundam] Placed ZakuEnemy at " + instance.transform.position +
                 " (facing the player's Gundam)" +
@@ -975,6 +1208,21 @@ namespace Gundam.EditorTools
 
         /// <summary>Sets a GameObject and every descendant to the given layer - used to put
         /// ExternalGundam's whole hierarchy (mesh + every bone) on GundamBodyLayer in one go.</summary>
+        /// <summary>Like SetLayerRecursively, but a GameObject whose Collider belongs to
+        /// an XR interactable (the joystick handles' grip balls / finger buttons /
+        /// trigger) keeps its current layer so the hands can still grab it (see the
+        /// CockpitInteriorLayer call site for why).</summary>
+        static void SetLayerRecursivelyExceptColliders(GameObject go, int layer)
+        {
+            bool grabCollider = go.GetComponent<Collider>() != null
+                && go.GetComponentInParent<XRBaseInteractable>(true) != null;
+            if (!grabCollider) go.layer = layer;
+            for (int i = 0; i < go.transform.childCount; i++)
+            {
+                SetLayerRecursivelyExceptColliders(go.transform.GetChild(i).gameObject, layer);
+            }
+        }
+
         static void SetLayerRecursively(GameObject go, int layer)
         {
             go.layer = layer;
@@ -1899,6 +2147,48 @@ namespace Gundam.EditorTools
             StripCollider(barB);
         }
 
+        /// <summary>World-space height (m) of a model's ACTUAL vertices, at its current
+        /// transform. SkinnedMeshRenderer.bounds is a loose padded box whose padding
+        /// differs per model, so it can't be used to make two models the same size -
+        /// this bakes each skinned mesh (BakeMesh output already carries the world
+        /// scale) and places the vertices with the renderer's position+rotation only
+        /// (verified in the Editor: linear with the root's localScale, e.g. Gundam
+        /// 0.9855 at x1 -> 9.855 at x10). Also includes plain MeshFilters.
+        /// Returns 0 if nothing measurable is found.</summary>
+        static float MeasureMeshHeight(GameObject root)
+        {
+            float minY = float.MaxValue, maxY = float.MinValue;
+            foreach (SkinnedMeshRenderer smr in root.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+            {
+                if (smr.sharedMesh == null) continue;
+                UnityEngine.Mesh baked = new UnityEngine.Mesh();
+                smr.BakeMesh(baked, false);
+                // BakeMesh already applies the renderer's world scale, so only
+                // position+rotation are applied here (localToWorldMatrix would
+                // count the scale twice whenever lossyScale != 1).
+                Matrix4x4 l2w = Matrix4x4.TRS(smr.transform.position, smr.transform.rotation, Vector3.one);
+                foreach (Vector3 v in baked.vertices)
+                {
+                    float y = l2w.MultiplyPoint3x4(v).y;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+                UnityEngine.Object.DestroyImmediate(baked);
+            }
+            foreach (MeshFilter mf in root.GetComponentsInChildren<MeshFilter>(true))
+            {
+                if (mf.sharedMesh == null) continue;
+                Matrix4x4 l2w = mf.transform.localToWorldMatrix;
+                foreach (Vector3 v in mf.sharedMesh.vertices)
+                {
+                    float y = l2w.MultiplyPoint3x4(v).y;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+            return maxY > minY ? maxY - minY : 0f;
+        }
+
         static void StripCollider(GameObject go)
         {
             Collider col = go.GetComponent<Collider>();
@@ -2318,6 +2608,134 @@ namespace Gundam.EditorTools
             return lever;
         }
 
+        // ---------------------------------------------------------------
+        // T-shaped vertical lever - per "새로운 수직 이동 T자 레버" and "플레이어가
+        // 콕핏 좌석에 정상적으로 앉았을 때의 어깨 높이를 기준으로 배치". Position is
+        // derived from the seat actually built by BuildSeat (not a fixed world Y):
+        //   seat surface   = Seat_Pan top
+        //   shoulder Y     = seat surface + SeatedShoulderAboveSeat (adult seated
+        //                    shoulder height, ~0.52-0.64 m; 0.58 used)
+        //   shoulder Z     = Seat_Back's front face at that height + shoulder depth
+        //   shoulder X     = +-SeatedShoulderHalfWidth (left side here)
+        // The grip sits just below shoulder height, a relaxed bent-elbow reach
+        // forward and slightly outboard of the left shoulder, so the forearm stays
+        // level and the wrist straight, and it's clear of LeftJoystick (lower and
+        // further in front) and the left display sightline. VerticalTLever then
+        // fine-tunes the height from the pilot's real eye height at runtime.
+        // Left hand only (movement hand); refused while LeftJoystick is held.
+        // ---------------------------------------------------------------
+        const float SeatedShoulderAboveSeat = 0.58f;
+        const float SeatedShoulderHalfWidth = 0.19f;
+        const float ShoulderDepthFromBackrest = 0.08f;
+        const float TLeverReachForward = 0.34f;   // grip in front of the shoulder
+        const float TLeverOutboard = 0.14f;       // grip outboard of the shoulder
+        const float TLeverBelowShoulder = 0.02f;
+        const float TLeverStemLength = 0.16f;
+
+        static VerticalTLever CreateVerticalTLever(Transform interior, HandJointTracker leftHand, JoystickLever leftStick,
+            Material accentMat, Material gripMat)
+        {
+            // --- Seated shoulder point, from the real seat objects ---
+            Transform pan = interior.Find("Seat_Pan");
+            Transform back = interior.Find("Seat_Back");
+            float seatTop = pan != null ? pan.localPosition.y + pan.localScale.y * 0.5f : 0.48f;
+            float shoulderY = seatTop + SeatedShoulderAboveSeat;
+            float backFrontZ = -0.44f;
+            if (back != null)
+            {
+                // Point on the backrest's front face at shoulder height (the back is tilted).
+                float localY = back.localScale.y > 0.0001f ? (shoulderY - back.localPosition.y) / back.localScale.y : 0f;
+                Vector3 frontLocal = back.localRotation * Vector3.Scale(new Vector3(0f, localY, 0.5f), back.localScale);
+                backFrontZ = back.localPosition.z + frontLocal.z;
+            }
+            float shoulderZ = backFrontZ + ShoulderDepthFromBackrest;
+            Vector3 leftShoulder = new Vector3(-SeatedShoulderHalfWidth, shoulderY, shoulderZ);
+            Vector3 gripPos = leftShoulder + new Vector3(-TLeverOutboard, -TLeverBelowShoulder, TLeverReachForward);
+
+            // --- Mount (origin = grip center) ---
+            GameObject mount = new GameObject("VerticalTLever");
+            mount.transform.SetParent(interior, false);
+            mount.transform.localPosition = gripPos;
+            mount.transform.localRotation = Quaternion.identity;
+
+            GameObject baseGo = CreateCube("VerticalTLever_Base", mount.transform, new Vector3(0f, -TLeverStemLength, 0f),
+                new Vector3(0.05f, 0.03f, 0.09f), accentMat);
+            StripCollider(baseGo);
+
+            GameObject stem = CreateCylinder("VerticalTLever_Stem", mount.transform, new Vector3(0f, -TLeverStemLength * 0.5f, 0f),
+                new Vector3(0.018f, TLeverStemLength * 0.5f, 0.018f), accentMat);
+            StripCollider(stem);
+
+            GameObject handleGo = new GameObject("VerticalTLever_Handle");
+            handleGo.transform.SetParent(mount.transform, false);
+            handleGo.transform.localPosition = Vector3.zero;
+
+            // Horizontal T bar: a capsule lying along X (capsule long axis = local Y,
+            // rotated 90 about Z), 14 cm long, 3.5 cm thick - a full overhand grip.
+            GameObject bar = CreateCapsule("VerticalTLever_Crossbar", handleGo.transform, Vector3.zero,
+                new Vector3(0.035f, 0.07f, 0.035f), gripMat);
+            bar.transform.localRotation = Quaternion.Euler(0f, 0f, 90f);
+
+            // Small hub where the stem meets the bar (visual only).
+            GameObject hub = CreateSphere("VerticalTLever_Hub", handleGo.transform, new Vector3(0f, -0.012f, 0f),
+                new Vector3(0.03f, 0.03f, 0.03f), accentMat);
+            StripCollider(hub);
+
+            // Real XRI selection target (wired to the left Near-Far Interactor
+            // in WireVerticalLeverInteractor once the rig exists).
+            XRSimpleInteractable interactable = handleGo.AddComponent<XRSimpleInteractable>();
+            Collider barCol = bar.GetComponent<Collider>();
+            if (barCol != null)
+            {
+                SerializedObject so = new SerializedObject(interactable);
+                SerializedProperty cols = so.FindProperty("m_Colliders");
+                if (cols != null)
+                {
+                    cols.ClearArray();
+                    cols.InsertArrayElementAtIndex(0);
+                    cols.GetArrayElementAtIndex(0).objectReferenceValue = barCol;
+                    so.ApplyModifiedProperties();
+                }
+            }
+
+            VerticalTLever lever = mount.AddComponent<VerticalTLever>();
+            lever.handle = handleGo.transform;
+            lever.stem = stem.transform;
+            lever.stemBase = baseGo.transform;
+            lever.crossbar = bar.transform;
+            lever.hand = leftHand;
+            lever.blockWhileGrabbed = leftStick != null ? new[] { leftStick } : new JoystickLever[0];
+            lever.travel = 0.035f; // 7 cm total
+            lever.gripAboveShoulder = -TLeverBelowShoulder;
+
+            Debug.Log("[Gundam] VerticalTLever at cockpit-local " + gripPos.ToString("F3") +
+                " (seat top " + seatTop.ToString("F2") + ", seated left shoulder " + leftShoulder.ToString("F3") + ").");
+            return lever;
+        }
+
+        /// <summary>Restricts the T lever's XRI selection to the LEFT hand's own
+        /// Near-Far Interactor (same lookup WireJoystickHandInteractors uses) and
+        /// hands it the pilot's head camera for the shoulder-height adaptation.</summary>
+        static void WireVerticalLeverInteractor(GameObject xrOrigin, VerticalTLever lever)
+        {
+            if (lever == null || xrOrigin == null) return;
+            Camera cam = xrOrigin.GetComponentInChildren<Camera>(true);
+            if (cam != null) lever.pilotHead = cam.transform;
+
+            Transform leftHandRoot = FindDeepChild(xrOrigin.transform, "Left Hand");
+            Transform leftInteractor = leftHandRoot != null ? FindDeepChild(leftHandRoot, "Near-Far Interactor") : null;
+            if (leftInteractor == null)
+            {
+                // No XRI hand rig: disable the XRI path so no other interactor can
+                // ever select it; the left-hand grip/pinch fallback still works.
+                XRSimpleInteractable xi = lever.handle != null ? lever.handle.GetComponent<XRSimpleInteractable>() : null;
+                if (xi != null) xi.enabled = false;
+                Debug.LogWarning("[Gundam] VerticalTLever: left 'Near-Far Interactor' not found - using the left-hand grip fallback only.");
+                return;
+            }
+            lever.onlyAllowedInteractor = leftInteractor;
+        }
+
         static GameObject CreateXROrigin(Transform parent, Vector3 localPos)
         {
             GameObject prefab = null;
@@ -2405,6 +2823,8 @@ namespace Gundam.EditorTools
                 // its default "see everything" mask, so that's how the
                 // Gundam's own viewpoint still reaches the cockpit screen.
                 viewCamera.cullingMask &= ~(1 << GundamBodyLayer);
+                // ...and the space-dust field (see SpaceBackdropLayer).
+                viewCamera.cullingMask &= ~(1 << SpaceBackdropLayer);
             }
             else
             {

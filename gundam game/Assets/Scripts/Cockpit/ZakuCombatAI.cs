@@ -28,6 +28,13 @@ namespace Gundam.Cockpit
     ///     keep watching the Gundam;
     ///   * the walk adds a hip roll / weight shift with each step.
     ///
+    /// COLONY BATTLEFIELD (arena, per "콜로니 ... 거기를 전장으로"): the Zaku
+    /// guards its spot in the colony city - it patrols slowly around where it
+    /// spawned until the Gundam comes within aggroRange, then fights as above.
+    /// It stays on the city floor inside the colony and walks around buildings
+    /// (ColonyStructure.ResolveWalker), so it never leaves the colony to chase
+    /// the Gundam across open space.
+    ///
     /// Only moves/poses its OWN transform and bones - never the player's suit,
     /// cameras or XR rig. Stops while EnemyHealth reports it destroyed and
     /// resets its velocity when it respawns.
@@ -98,6 +105,16 @@ namespace Gundam.Cockpit
         [Tooltip("Head keeps looking at the target (up to this many degrees off the body).")]
         public float headTrackDegrees = 45f;
 
+        [Header("Colony battlefield")]
+        [Tooltip("Keeps the Zaku on the colony's city floor and out of its buildings (optional).")]
+        public ColonyStructure arena;
+        [Tooltip("Body radius (m) for staying out of buildings.")]
+        public float walkerRadius = 4.5f;
+        [Tooltip("Only fights when the Gundam is closer than this (m); otherwise patrols around its spawn point.")]
+        public float aggroRange = 450f;
+        public float patrolRadius = 70f;
+        public float patrolSpeed = 5f;
+
         [Header("Procedural walk")]
         public bool animateBody = true;
         [Tooltip("Metres covered per step.")]
@@ -122,6 +139,9 @@ namespace Gundam.Cockpit
         float _approachMul = 1f;
         float _findTimer;
         float _strafeCur;
+        Vector3 _home;
+        Vector3 _patrolPoint;
+        float _patrolTimer;
         Vector3 _velRef;
         float _yawVel;
         float _lead;
@@ -141,6 +161,8 @@ namespace Gundam.Cockpit
         void Awake()
         {
             _groundY = transform.position.y;
+            _home = transform.position;
+            _patrolPoint = _home;
             _health = GetComponent<EnemyHealth>();
 
             _hips = FindBone("Hips");
@@ -231,6 +253,12 @@ namespace Gundam.Cockpit
             Vector3 toTarget = target.position - transform.position;
             toTarget.y = 0f;
             float dist = toTarget.magnitude;
+
+            if (aggroRange > 0f && (target.position - transform.position).magnitude > aggroRange)
+            {
+                Patrol(dt);
+                return;
+            }
             Vector3 radial = dist > 0.01f ? toTarget / dist : transform.forward;
             Vector3 tangent = Vector3.Cross(Vector3.up, radial); // Zaku's own right when facing the target
 
@@ -258,6 +286,7 @@ namespace Gundam.Cockpit
 
             Vector3 p = transform.position + Velocity * dt;
             p.y = _groundY;
+            if (arena != null) p = arena.ResolveWalker(p, 18f, walkerRadius);
             transform.position = p;
 
             if (dist > 0.01f)
@@ -268,6 +297,37 @@ namespace Gundam.Cockpit
                 float wantYaw = Mathf.Atan2(radial.x, radial.z) * Mathf.Rad2Deg + _lead;
                 float yaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, wantYaw, ref _yawVel,
                     Mathf.Max(0.05f, turnSmoothTime), Mathf.Max(1f, turnSpeed * 2f));
+                transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+            }
+        }
+
+        /// <summary>Out of the fight: stroll between random points around home.</summary>
+        void Patrol(float dt)
+        {
+            _patrolTimer -= dt;
+            Vector3 to = _patrolPoint - transform.position;
+            to.y = 0f;
+            if (_patrolTimer <= 0f || to.magnitude < 6f)
+            {
+                Vector2 rnd = Random.insideUnitCircle * patrolRadius;
+                _patrolPoint = _home + new Vector3(rnd.x, 0f, rnd.y);
+                _patrolTimer = Random.Range(6f, 14f);
+                to = _patrolPoint - transform.position;
+                to.y = 0f;
+            }
+            Vector3 desired = to.magnitude > 1f ? to.normalized * patrolSpeed : Vector3.zero;
+            desired += Separation();
+            desired.y = 0f;
+            Velocity = Vector3.SmoothDamp(Velocity, desired, ref _velRef, Mathf.Max(0.05f, velocitySmoothTime) * 1.5f);
+            Vector3 p = transform.position + Velocity * dt;
+            p.y = _groundY;
+            if (arena != null) p = arena.ResolveWalker(p, 18f, walkerRadius);
+            transform.position = p;
+            _lead = Mathf.Lerp(_lead, 0f, 1f - Mathf.Exp(-dt * 3f));
+            if (Velocity.sqrMagnitude > 0.5f)
+            {
+                float wantYaw = Mathf.Atan2(Velocity.x, Velocity.z) * Mathf.Rad2Deg;
+                float yaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, wantYaw, ref _yawVel, 0.8f, 60f);
                 transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
         }

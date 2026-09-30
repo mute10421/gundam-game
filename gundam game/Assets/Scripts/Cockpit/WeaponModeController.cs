@@ -41,6 +41,16 @@ namespace Gundam.Cockpit
     ///                           Head Vulcan component is switched off.
     ///   BEAM SABER            - as described above (thumb = Head Vulcan).
     ///
+    /// SABER: LOOK vs ATTACK (per "빔샤벨 상태에서 아무도 락온 안되어있을때는
+    /// 화면조작 락온이 되면 그때 공격기능으로"): in BEAM SABER, while nothing is
+    /// locked RightJoystick turns the view as usual (the saber stays in guard); as
+    /// soon as the lock-on ring captures an enemy the view follows it
+    /// (SaberLookAssist) and RightJoystick becomes the saber (thrust / swing). If
+    /// the stick is still deflected at that moment, it has to come back near
+    /// center first (so the turn you were making doesn't turn into a slash) - the
+    /// same when the lock is lost: the saber drops to guard at once and the view
+    /// takes the stick again once it's re-centered.
+    ///
     /// Choosing another weapon undoes all of that, so the right hand can grab and
     /// aim with RightJoystick again. RightJoystick's own code is not modified -
     /// only these two references are swapped at runtime and put back. If the right
@@ -68,6 +78,11 @@ namespace Gundam.Cockpit
         public BeamSaberControlStick saberStick;
         public BeamSaberArmController saberArm;
 
+        [Tooltip("Lock-on ring - decides SABER look (nothing locked) vs attack (locked). Found automatically if empty.")]
+        public OrbitHUDTargetLock targetLock;
+        [Tooltip("RightJoystick changes owner (view <-> saber) only once its deflection is below this.")]
+        [Range(0.05f, 1f)] public float saberRecenterThreshold = 0.35f;
+
         [Header("BEAM RIFLE")]
         public BeamRifleController rifle;
         [Tooltip("Switched off while BEAM RIFLE is active (the right thumb fires the rifle instead).")]
@@ -76,6 +91,8 @@ namespace Gundam.Cockpit
         public Mode startMode = Mode.HeadVulcan;
 
         public Mode CurrentMode { get; private set; } = Mode.HeadVulcan;
+        /// <summary>BEAM SABER: RightJoystick currently drives the saber (an enemy is locked).</summary>
+        public bool SaberAttackActive => _saberInput;
         public bool HasPending => _pending.HasValue;
         public Mode? PendingMode => _pending;
         public event Action<Mode> ModeChanged;
@@ -86,12 +103,15 @@ namespace Gundam.Cockpit
         bool _aimWasEnabled;
         JoystickLever _savedViewStick;
         Mode? _pending;
+        bool _viewDetached;
+        bool _saberInput;
 
         public static string DisplayName(Mode m) =>
             m == Mode.BeamSaber ? "BEAM SABER" : m == Mode.BeamRifle ? "BEAM RIFLE" : "HEAD VULCAN";
 
         void Start()
         {
+            if (targetLock == null) targetLock = FindFirstObjectByType<OrbitHUDTargetLock>();
             ApplyMode(startMode, force: true);
         }
 
@@ -115,6 +135,49 @@ namespace Gundam.Cockpit
                 Mode m = _pending.Value;
                 _pending = null;
                 ApplyMode(m, force: false);
+            }
+            UpdateSaberOwner();
+        }
+
+        /// <summary>BEAM SABER: who gets RightJoystick - the view (nothing locked) or
+        /// the saber (locked). See the class comment.</summary>
+        void UpdateSaberOwner()
+        {
+            if (!_consumersDetached) return; // not in BEAM SABER (RightJoystick mode)
+            Transform t = targetLock != null ? targetLock.CurrentTarget : null;
+            bool locked = t != null && t.gameObject.activeInHierarchy;
+            if (locked)
+            {
+                EnemyHealth hp = t.GetComponent<EnemyHealth>();
+                if (hp != null && hp.IsDead) locked = false;
+            }
+            bool centered = rightStick == null || rightStick.tiltInput.magnitude < saberRecenterThreshold;
+            if (locked)
+            {
+                SetViewStickDetached(true);          // the view follows the target now
+                if (!_saberInput && centered) _saberInput = true;
+            }
+            else
+            {
+                _saberInput = false;                 // saber back to guard at once
+                if (_viewDetached && centered) SetViewStickDetached(false);
+            }
+            if (saberArm != null) saberArm.inputEnabled = _saberInput;
+        }
+
+        void SetViewStickDetached(bool detach)
+        {
+            if (viewController == null) { _viewDetached = detach; return; }
+            if (detach && !_viewDetached)
+            {
+                _savedViewStick = viewController.rightJoystick;
+                viewController.rightJoystick = null;
+                _viewDetached = true;
+            }
+            else if (!detach && _viewDetached)
+            {
+                if (viewController.rightJoystick == null) viewController.rightJoystick = _savedViewStick;
+                _viewDetached = false;
             }
         }
 
@@ -153,16 +216,22 @@ namespace Gundam.Cockpit
         /// code is unchanged), and give it back afterwards.</summary>
         void SetConsumersDetached(bool detach)
         {
+            // The rifle aim/fire is off for the whole of BEAM SABER; the view stick
+            // is handed back and forth by UpdateSaberOwner (look vs attack).
             if (detach && !_consumersDetached)
             {
                 if (aim != null) { _aimWasEnabled = aim.enabled; aim.enabled = false; }
-                if (viewController != null) { _savedViewStick = viewController.rightJoystick; viewController.rightJoystick = null; }
+                _saberInput = false;
+                if (saberArm != null) saberArm.inputEnabled = false;
                 _consumersDetached = true;
+                UpdateSaberOwner();
             }
             else if (!detach && _consumersDetached)
             {
                 if (aim != null) aim.enabled = _aimWasEnabled;
-                if (viewController != null && viewController.rightJoystick == null) viewController.rightJoystick = _savedViewStick;
+                SetViewStickDetached(false);
+                _saberInput = false;
+                if (saberArm != null) saberArm.inputEnabled = true;
                 _consumersDetached = false;
             }
         }

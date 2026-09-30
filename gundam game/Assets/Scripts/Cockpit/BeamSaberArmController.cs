@@ -66,6 +66,8 @@ namespace Gundam.Cockpit
         [Header("Input")]
         [Tooltip("RightJoystick: its tiltInput drives the saber poses (thrust / swing). When set, 'stick' is ignored.")]
         public JoystickLever rightStick;
+        [Tooltip("False = RightJoystick is turning the view (nothing locked, see WeaponModeController): the saber holds the guard pose.")]
+        public bool inputEnabled = true;
         [Tooltip("Old input: hand-held control stick (used only when rightStick is empty).")]
         public BeamSaberControlStick stick;
         [Tooltip("The pilot's head (Main Camera).")]
@@ -192,7 +194,7 @@ namespace Gundam.Cockpit
                 Vector3 U = look * cockpitSpace.up;
                 Vector3 R = look * cockpitSpace.right;
                 Vector3 bladeDir;
-                JoystickPose(rightStick.tiltInput, out Vector3 gripV, out bladeDir);
+                JoystickPose(inputEnabled ? rightStick.tiltInput : Vector2.zero, out Vector3 gripV, out bladeDir);
                 float reach = _l1 + _l2 + gripOffset;
                 gripTarget = a + (R * gripV.x + U * gripV.y + F * gripV.z) * reach;
                 Vector3 bladeW = (R * bladeDir.x + U * bladeDir.y + F * bladeDir.z).normalized;

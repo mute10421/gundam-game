@@ -32,6 +32,10 @@ namespace Gundam.Cockpit
         public string viewerName = "HeadCam";
         [Tooltip("Emissive material for the specks/stars (wired by GundamCockpitSetup).")]
         public Material material;
+        [Tooltip("Optional material for the far stars only - GundamCockpitSetup gives it the Background queue with no depth writes, so the stars never draw in front of anything (e.g. the kilometres-big colony).")]
+        public Material farMaterial;
+        [Tooltip("Optional: the near dust specks are hidden while the viewer is inside this colony (no space dust floating in a city).")]
+        public ColonyStructure colony;
         public int seed = 20260928;
 
         [Header("Near dust (parallax)")]
@@ -57,6 +61,7 @@ namespace Gundam.Cockpit
         Vector3Int _cell;
         bool _haveCell;
         float _findTimer;
+        bool _hiddenInside;
 
         void Awake()
         {
@@ -85,7 +90,9 @@ namespace Gundam.Cockpit
                 far.layer = gameObject.layer;
                 far.transform.SetParent(transform, false);
                 far.AddComponent<MeshFilter>().sharedMesh = BuildFarMesh();
-                SetupRenderer(far.AddComponent<MeshRenderer>());
+                MeshRenderer farR = far.AddComponent<MeshRenderer>();
+                SetupRenderer(farR);
+                if (farMaterial != null) farR.sharedMaterial = farMaterial;
                 _far = far.transform;
             }
 
@@ -116,6 +123,20 @@ namespace Gundam.Cockpit
 
             Vector3 p = viewer.position;
             if (_far != null) _far.position = p;
+
+            if (colony != null)
+            {
+                bool inside = colony.IsInside(p);
+                if (inside != _hiddenInside)
+                {
+                    _hiddenInside = inside;
+                    for (int k = 0; k < _tiles.Length; k++)
+                    {
+                        MeshRenderer tr = _tiles[k] != null ? _tiles[k].GetComponent<MeshRenderer>() : null;
+                        if (tr != null) tr.enabled = !inside;
+                    }
+                }
+            }
 
             float s = Mathf.Max(1f, tileSize);
             Vector3Int cell = new Vector3Int(Mathf.FloorToInt(p.x / s), Mathf.FloorToInt(p.y / s), Mathf.FloorToInt(p.z / s));

@@ -29,6 +29,10 @@ namespace Gundam.Cockpit
         [Tooltip("Tumble speed range (deg/s) for each piece.")]
         public Vector2 tumbleSpeed = new Vector2(0.3f, 1.5f);
         public int seed = 777;
+        [Tooltip("Optional: the wrecks are hidden while the viewer is inside this colony (they'd otherwise float inside the city).")]
+        public ColonyStructure colony;
+        Renderer[] _renderers;
+        bool _hidden;
 
         Vector3 _startPos;
         Vector3 _viewerStart;
@@ -79,6 +83,17 @@ namespace Gundam.Cockpit
                 _haveStart = true;
             }
             transform.position = _startPos + (viewer.position - _viewerStart) * followFactor;
+
+            if (colony != null)
+            {
+                bool inside = colony.IsInside(viewer.position);
+                if (inside != _hidden)
+                {
+                    _hidden = inside;
+                    if (_renderers == null) _renderers = GetComponentsInChildren<Renderer>(true);
+                    foreach (Renderer r in _renderers) if (r != null) r.enabled = !inside;
+                }
+            }
         }
     }
 }

@@ -72,6 +72,12 @@ namespace Gundam.Cockpit
         public bool includeHitTargets = false;
         public float rescanInterval = 0.5f;
 
+        [Header("Line of sight (per \"건물뒤에 보이지 않는 적은 락온되면 안됨\")")]
+        [Tooltip("Colony battlefield: enemies hidden behind its buildings / walls can't be locked. Found automatically if empty.")]
+        public ColonyStructure colony;
+        [Tooltip("A locked enemy that goes out of sight stays locked this long (s) - so a thin pillar doesn't break the lock.")]
+        public float occludedGrace = 0.35f;
+
         /// <summary>The currently captured target (null = none).</summary>
         public Transform CurrentTarget { get; private set; }
         /// <summary>0 = ring fully open, 1 = fully closed onto the target.</summary>
@@ -96,6 +102,8 @@ namespace Gundam.Cockpit
         float _radius;
         bool _haveLockPose;
         bool _lockedMatOn;
+        float _occludedTimer;
+        bool _colonySearched;
 
         void Awake()
         {
@@ -122,6 +130,11 @@ namespace Gundam.Cockpit
 
         void Update()
         {
+            if (colony == null && !_colonySearched)
+            {
+                _colonySearched = true;
+                colony = FindFirstObjectByType<ColonyStructure>();
+            }
             _rescanTimer -= Time.deltaTime;
             if (_rescanTimer <= 0f)
             {
@@ -147,6 +160,15 @@ namespace Gundam.Cockpit
                 float limit = ringRadius * (c == CurrentTarget ? releaseRadiusFactor : captureRadiusFactor);
                 float off = center.magnitude;
                 if (off > limit) continue;
+                // Hidden behind a building/wall: can't be captured; the current lock
+                // survives only a short occlusion.
+                if (!InSight(c))
+                {
+                    if (c != CurrentTarget) continue;
+                    _occludedTimer += Time.deltaTime;
+                    if (_occludedTimer > occludedGrace) continue;
+                }
+                else if (c == CurrentTarget) _occludedTimer = 0f;
                 float score = c == CurrentTarget ? off * 0.5f : off; // prefer keeping the current lock
                 if (score < bestScore)
                 {
@@ -166,6 +188,7 @@ namespace Gundam.Cockpit
                     if (CurrentTarget == null && _t <= 0.01f) { _center = Vector2.zero; _radius = ringRadius; }
                     _haveLockPose = true;
                 }
+                if (best != CurrentTarget) _occludedTimer = 0f;
                 CurrentTarget = best;
                 float f = 1f - Mathf.Exp(-followSharpness * Time.deltaTime);
                 _center = Vector2.Lerp(_center, bestCenter, f);
@@ -175,6 +198,7 @@ namespace Gundam.Cockpit
             else
             {
                 CurrentTarget = null;
+                _occludedTimer = 0f;
                 _t = Mathf.MoveTowards(_t, 0f, Time.deltaTime / Mathf.Max(0.01f, releaseTime));
                 if (_t <= 0f) _haveLockPose = false;
             }
@@ -239,6 +263,17 @@ namespace Gundam.Cockpit
             if (ProjectPoint(b.center + side * Mathf.Max(b.extents.x, b.extents.z), out Vector2 edge)) r = Mathf.Max(r, (edge - center).magnitude);
             radius = r * sizeMargin;
             return true;
+        }
+
+        /// <summary>Can the pilot (HeadCam) see the target - its middle or its top
+        /// (so a head over a roof still counts)?</summary>
+        bool InSight(Transform target)
+        {
+            if (colony == null) return true;
+            Bounds b = TargetBounds(target);
+            Vector3 o = ViewOrigin();
+            if (!colony.SegmentBlocked(o, b.center)) return true;
+            return !colony.SegmentBlocked(o, b.center + Vector3.up * (b.extents.y * 0.8f));
         }
 
         Vector3 ViewOrigin()

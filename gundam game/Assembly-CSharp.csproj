@@ -61,9 +61,12 @@
     <Compile Include="Assets\Scripts\Cockpit\SaberLookAssist.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandTrackingStatusLogger.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalTLever.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\SpawnSelectPanel.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\ColonyStructure.cs" />
     <Compile Include="Assets\Scripts\Cockpit\JoystickFingerButtons.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponAimFireController.cs" />
     <Compile Include="Assets\TutorialInfo\Readme.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\SuitCollision.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ExternalGundamFollower.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ShipMovementController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandJointTracker.cs" />
@@ -78,6 +81,7 @@
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitWeaponHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\PlayerHealth.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\ColonyAtmosphere.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyMarker.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponModeController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanController.cs" />

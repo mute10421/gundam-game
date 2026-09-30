@@ -179,6 +179,7 @@ namespace Gundam.EditorTools
             // Passed the player's Gundam so its ZakuCombatAI knows what to face/circle.
             // Player hit points (per "건담에 체력은 3000이고") - on the Gundam body the
             // Zakus shoot at, feeding the cockpit's shared vitals (HP gauges).
+            ColonyStructure colony = BuildColony();
             PlayerHealth playerHealth = null;
             if (gundamResult != null && gundamResult.instance != null)
             {
@@ -188,8 +189,15 @@ namespace Gundam.EditorTools
                 playerHealth.capsuleTop = MobileSuitTargetHeight - 1f;
                 hudManager.Vitals.MaxHP = 3000f;
                 hudManager.Vitals.HP = 3000f;
+
+                // Per "건담이 상대를 통과하지않게 충돌을 넣어": the Gundam body stops at
+                // (and slides around) enemy suits instead of passing through them.
+                SuitCollision suitCollision = suitRoot.AddComponent<SuitCollision>();
+                suitCollision.body = gundamResult.instance.transform;
+                suitCollision.bodyHeight = MobileSuitTargetHeight;
+                suitCollision.colony = colony;
             }
-            PlaceZakuEnemy(gundamResult != null && gundamResult.instance != null ? gundamResult.instance.transform : null);
+            PlaceZakuEnemy(gundamResult != null && gundamResult.instance != null ? gundamResult.instance.transform : null, colony);
 
             // --- Full 360-degree solid enclosure (floor + an inward-facing
             //     curved dome) so the real room/Skybox is never visible in
@@ -280,6 +288,9 @@ namespace Gundam.EditorTools
             VerticalThrustController verticalThrust = suitRoot.AddComponent<VerticalThrustController>();
             verticalThrust.lever = verticalLever;
             verticalThrust.maxClimbSpeed = ship.maxMoveSpeed; // same top speed as horizontal
+            // Colony gravity: climbing on the T lever cancels the fall (SuitCollision).
+            SuitCollision gravityCollision = suitRoot.GetComponent<SuitCollision>();
+            if (gravityCollision != null) gravityCollision.thrust = verticalThrust;
 
             // --- Gun turret (mounted on the suit, aimed by the right stick) ---
             // Per report ("눈앞에있는 막대기로 만들어친 총열같이 생긴놈을
@@ -600,6 +611,14 @@ namespace Gundam.EditorTools
             // Same grip-ball visual language as the joysticks' own GripBall.
             calibManager.confirmButton = BuildCalibrationConfirmButton(interior.transform, buttonGreenMat);
 
+            // --- SORTIE POINT selection (per "처음에 스폰 위치를 지정해야할듯 어디서
+            //     시작할지 우주 콜로니 외관 콜로니 안 이런식으로", option "게임 시작 시
+            //     선택 화면"): after calibration, a touch panel picks where the suit
+            //     starts. See SpawnSelectPanel. ---
+            BuildSpawnSelectPanel(interior.transform, suitRoot.transform,
+                gundamResult != null && gundamResult.instance != null ? gundamResult.instance.transform : null,
+                colony, calibManager, leftHand, rightHand, new Behaviour[] { ship, verticalThrust });
+
             // --- Targets to shoot at — pushed out to the sides/above-below so they
             //     sit in the open space around the front display, not stacked
             //     directly behind it. Kept in world space, not parented to the suit. ---
@@ -634,15 +653,28 @@ namespace Gundam.EditorTools
             dustRoot.layer = SpaceBackdropLayer;
             SpaceDustField dust = dustRoot.AddComponent<SpaceDustField>();
             dust.material = starMat;
+            // Far stars go in the Background queue without depth writes so they never
+            // draw in front of the kilometres-big colony; near dust hides inside it.
+            Material farStarMat = MakeEmissiveMat(Color.black, Color.white);
+            if (farStarMat.HasProperty("_ZWrite")) farStarMat.SetFloat("_ZWrite", 0f);
+            farStarMat.renderQueue = 1000;
+            dust.farMaterial = farStarMat;
+            dust.colony = colony;
             if (gundamResult != null && gundamResult.headCam360 != null && gundamResult.headCam360.headCam != null)
             {
                 dust.viewer = gundamResult.headCam360.headCam.transform;
+            }
+            // Colony air (fog/ambient) and exterior/interior culling follow HeadCam.
+            if (colony != null)
+            {
+                ColonyAtmosphere atmosphere = colony.GetComponent<ColonyAtmosphere>();
+                if (atmosphere != null) atmosphere.viewer = dust.viewer;
             }
 
             // --- Distant space wreckage (VARCO 3D models in Assets/Models/Debris) -
             //     per "우주에 건물을 넣을려고 하는데 우주에 잔해같은거 거슬리지 않게"
             //     (see PlaceSpaceDebris / SpaceDebrisField). ---
-            PlaceSpaceDebris(dust.viewer);
+            PlaceSpaceDebris(dust.viewer, colony);
 
             // --- BEAM SABER mode (WEAPON display touch -> right hand leaves
             //     RightJoystick -> hand-held control stick drives the real Gundam
@@ -667,6 +699,35 @@ namespace Gundam.EditorTools
             // sticks ungrabbable. The XR rig's own settings are left untouched.
             SetLayerRecursivelyExceptColliders(interior, CockpitInteriorLayer);
 
+            // --- COCKPIT STATION - per "콕핏이 건담을 따라다니니까 콕핏에서 자꾸 밖에
+            //     사물이 들어와서 시야를 가려 콕핏을 졸라 멀리 배치해 건담을 안따라
+            //     다니게해". The cockpit (interior + the XR rig the pilot sits in +
+            //     its fill light) used to be a child of MobileSuitRoot, so it flew
+            //     along with the Gundam - into streets, buildings and wreckage, which
+            //     the pilot's own camera then saw INSIDE the cabin. It now sits in a
+            //     fixed, empty spot far outside the battlefield and never moves; the
+            //     pilot sees the world only through the dome (HeadCam in the Gundam's
+            //     head, unchanged). MobileSuitRoot itself still moves exactly as
+            //     before (ShipMovementController untouched) and the Gundam still
+            //     follows it; nothing reads the cockpit's world position (only its
+            //     directions), so aiming, the view, the sticks and the touch screens
+            //     work the same. The XR rig is only re-parented - none of its
+            //     settings change. ---
+            GameObject station = new GameObject("CockpitStation");
+            station.transform.SetPositionAndRotation(suitRoot.transform.position + CockpitStationOffset, suitRoot.transform.rotation);
+            GameObject fillLight = GameObject.Find("Cockpit_FillLight");
+            foreach (Transform t in new[] { interior.transform, xrOrigin != null ? xrOrigin.transform : null, fillLight != null ? fillLight.transform : null })
+            {
+                if (t == null) continue;
+                Vector3 lp = suitRoot.transform.InverseTransformPoint(t.position);
+                Quaternion lr = Quaternion.Inverse(suitRoot.transform.rotation) * t.rotation;
+                t.SetParent(station.transform, false);
+                t.localPosition = lp;
+                t.localRotation = lr;
+            }
+            Debug.Log("[Gundam] Cockpit moved to a fixed CockpitStation at " + station.transform.position +
+                " - it no longer follows the Gundam (the world is seen only through the dome).");
+
             System.IO.Directory.CreateDirectory("Assets/Scenes");
             EditorSceneManager.SaveScene(scene, ScenePath);
             AddSceneToBuildSettings(ScenePath);
@@ -675,6 +736,13 @@ namespace Gundam.EditorTools
             Debug.Log("[Gundam] Cockpit prototype scene (visual overhaul) built and saved at " + ScenePath +
                        ". Open Project Settings > XR Plug-in Management to enable OpenXR + Hand Tracking if you haven't yet.");
         }
+
+        // Fixed spot for the cockpit (see COCKPIT STATION above): ~9 km from the
+        // battlefield - well past the pilot camera's 1 km far clip in every
+        // direction from the colony, wreckage and start area - yet close enough to
+        // the world origin that XR tracking keeps sub-millimetre float precision
+        // (much farther, e.g. 60 km, would make the cabin and hands visibly jitter).
+        static readonly Vector3 CockpitStationOffset = new Vector3(0f, -4000f, -8000f);
 
         // Where the head-cam feed is saved as a real asset (needs to be a
         // persisted .renderTexture asset, not a plain "new RenderTexture(...)"
@@ -946,8 +1014,9 @@ namespace Gundam.EditorTools
             headCam.cullingMask &= ~(1 << GundamBodyLayer);
             // ...and never the cockpit interior either (see CockpitInteriorLayer).
             headCam.cullingMask &= ~(1 << CockpitInteriorLayer);
-            // Far enough for the distant wreckage (up to ~900m) and far stars.
-            headCam.farClipPlane = Mathf.Max(headCam.farClipPlane, 2000f);
+            // Far enough for the distant wreckage (up to ~900m), far stars and the
+            // whole space colony (6.4 km across, far end 13.5 km away at the start).
+            headCam.farClipPlane = Mathf.Max(headCam.farClipPlane, 16000f);
 
             Debug.Log("[Gundam] Head camera attached to the '" + head.name + "' bone, feeding RenderTexture at " +
                 HeadCamRenderTexturePath + ".");
@@ -1105,6 +1174,13 @@ namespace Gundam.EditorTools
             lookAssist.modes = modes;
             lookAssist.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
             lookAssist.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
+            lookAssist.followOnlyLocked = true;
+            // Per "빔샤벨 상태에서 아무도 락온 안되어있을때는 화면조작 락온이 되면 그때
+            // 공격기능으로": the lock decides whether RightJoystick turns the view or
+            // swings the saber; per "건물뒤에 보이지 않는 적은 락온되면 안됨" the ring
+            // checks line of sight against the colony.
+            modes.targetLock = lookAssist.targetLock;
+            if (lookAssist.targetLock != null) lookAssist.targetLock.colony = UnityEngine.Object.FindFirstObjectByType<ColonyStructure>();
 
             // --- WEAPON display touch buttons ---
             Transform weaponCanvas = interior.transform.Find("SystemCheckDisplay/SysCheck_Right/Weapon_Canvas");
@@ -1188,6 +1264,51 @@ namespace Gundam.EditorTools
             }
             Debug.Log("[Gundam] SystemCheckDisplay scaled x" + s + ", offset " + offset.ToString("F3") +
                 " (side screens now start " + DisplayBottomAboveGrip + "m above the grips at y " + gripTop.ToString("F2") + ").");
+        }
+
+        /// <summary>The SORTIE POINT panel: floating (no screen prop, like the
+        /// calibration prompt) where that prompt was, with four big touch buttons.</summary>
+        static SpawnSelectPanel BuildSpawnSelectPanel(Transform interior, Transform suitRoot, Transform body, ColonyStructure colony,
+            CalibrationManager calibration, HandJointTracker leftHand, HandJointTracker rightHand, Behaviour[] pause)
+        {
+            GameObject canvasGo = new GameObject("SpawnSelect_Canvas");
+            canvasGo.transform.SetParent(interior, false);
+            canvasGo.transform.localPosition = new Vector3(0f, 1.2f, 0.34f);
+            canvasGo.transform.localRotation = Quaternion.identity;
+            canvasGo.transform.localScale = Vector3.one * 0.0009f; // 1 unit = 0.9 mm
+            RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
+            canvasRect.sizeDelta = new Vector2(520, 360);
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvasGo.AddComponent<CanvasScaler>();
+
+            CreateUIImage("Backing", canvasGo.transform, Vector2.zero, new Vector2(520, 360), new Color(0.02f, 0.03f, 0.08f, 0.8f));
+            Text title = CreateUIText("Title", canvasGo.transform, new Vector2(0, 148), new Vector2(500, 40), 26, TextAnchor.MiddleCenter,
+                new Color(0.85f, 0.95f, 1f), "SORTIE POINT  /  출격 위치 선택");
+            string[] labels = { "SPACE\n우주", "COLONY EXTERIOR\n콜로니 외관", "COLONY ENTRANCE\n콜로니 안 (입구)", "DOWNTOWN\n콜로니 안 (도심)" };
+            Vector2[] pos = { new Vector2(-122, 55), new Vector2(122, 55), new Vector2(-122, -95), new Vector2(122, -95) };
+            SpawnSelectPanel.TouchButton[] buttons = new SpawnSelectPanel.TouchButton[4];
+            Vector2 size = new Vector2(226, 130); // ~20 x 12 cm
+            for (int i = 0; i < 4; i++)
+            {
+                Image bg = CreateUIImage("Btn_Spawn_" + (SpawnSelectPanel.Point)i, canvasGo.transform, pos[i], size, new Color(0.08f, 0.12f, 0.2f, 0.95f));
+                Text t = CreateUIText("Label", bg.transform, Vector2.zero, size, 22, TextAnchor.MiddleCenter, new Color(0.8f, 0.9f, 1f), labels[i]);
+                buttons[i] = new SpawnSelectPanel.TouchButton { point = (SpawnSelectPanel.Point)i, rect = bg.rectTransform, background = bg, label = t };
+            }
+
+            SpawnSelectPanel panel = suitRoot.gameObject.AddComponent<SpawnSelectPanel>();
+            panel.suitRoot = suitRoot;
+            panel.body = body;
+            panel.colony = colony;
+            panel.calibration = calibration;
+            panel.pauseUntilChosen = pause;
+            panel.leftHand = leftHand;
+            panel.rightHand = rightHand;
+            panel.buttons = buttons;
+            panel.panelRoot = canvasGo;
+            panel.titleText = title;
+            canvasGo.SetActive(false);
+            return panel;
         }
 
         static WeaponTouchPanel.TouchButton BuildTouchButton(Transform canvas, string name, string label, Vector2 pos,
@@ -1608,7 +1729,7 @@ namespace Gundam.EditorTools
         // ---------------------------------------------------------------
         const string DebrisModelFolder = "Assets/Models/Debris";
 
-        static void PlaceSpaceDebris(Transform viewer)
+        static void PlaceSpaceDebris(Transform viewer, ColonyStructure colony = null)
         {
             if (!AssetDatabase.IsValidFolder(DebrisModelFolder))
             {
@@ -1631,12 +1752,12 @@ namespace Gundam.EditorTools
             // area's center. Azimuth 0 = +Z (straight ahead at start).
             Vector4[] spots =
             {
-                new Vector4(35f, 12f, 560f, 260f),
+                new Vector4(75f, 12f, 560f, 260f),   // (was 35 deg - moved off the colony, straight ahead)
                 new Vector4(105f, -16f, 650f, 180f),
                 new Vector4(160f, 9f, 500f, 150f),
                 new Vector4(215f, 24f, 720f, 300f),
                 new Vector4(275f, -9f, 580f, 200f),
-                new Vector4(330f, -26f, 620f, 160f),
+                new Vector4(300f, -26f, 620f, 160f), // (was 330 deg)
             };
             Vector3 center = new Vector3(0f, 10f, 40f);
 
@@ -1697,7 +1818,1505 @@ namespace Gundam.EditorTools
 
             SpaceDebrisField field = root.AddComponent<SpaceDebrisField>();
             field.viewer = viewer;
+            field.colony = colony; // wreckage hidden while inside the colony
             Debug.Log("[Gundam] Placed " + spots.Length + " distant wreck pieces from " + models.Length + " model(s) in " + DebrisModelFolder + ".");
+        }
+
+        // ---------------------------------------------------------------
+        // Space colony battlefield - per "우주공간에 거대한 구조물이 있으면 좋을거같아
+        // 건담이 들어갈수있는 그래서 거기를 전장으로 사용하게", "콜로니를 엄청 크게
+        // 만들어서 콜로니 안에 도시를", "조금 멀리있어도되 내가 가서 싸우면되니까",
+        // and then "더 커야하고 더 자세하고 더 콜로니 같아야하고 콜로니 안에서는
+        // 중력이 있을거야 진짜 엄청커야해 도시가 진짜크게 복잡한도시고 그래서
+        // 도시에서 싸우는느낌이 있게" (collision: "부딪히게").
+        //
+        // A full-size Island-3 (O'Neill) colony like the ones in Gundam: 6.4 km
+        // across and 12 km long, lying along +Z with its near end cap 1.5 km
+        // ahead of the start. Outside: panelled hull with frame ribs and light
+        // rings, three giant mirrors hinged at the far end, a docking spindle on
+        // the near cap - and a huge war-damage BREACH torn in the near cap at
+        // ground level, which is the way in. Inside: the hull alternates three
+        // land strips and three glowing window strips; the bottom land strip is a
+        // dense downtown (4 km x 2 km: a boulevard with an elevated highway down
+        // the middle, cross highways, hundreds of setback towers / podium towers
+        // / slabs with rooftop gear, parks and plazas on curb-high block plates)
+        // fading into suburbs and farmland toward the far end, and the land curves
+        // up on both sides like a real colony. The two land strips overhead are
+        // city-light textures. Gravity inside (SuitCollision) pulls down onto it.
+        //
+        // Everything is procedural, low-poly and merged per material and per
+        // 1 km chunk (the head camera renders the scene six times a frame for
+        // the 360 view). Collision lives in ColonyStructure.
+        // ---------------------------------------------------------------
+        const float ColonyRadius = 3200f;
+        const float ColonyLength = 12000f;
+        const float ColonyNearZ = 1500f;          // near end cap (the Gundam starts at z = 20)
+        const float ColonyBreachHalfWidth = 330f;  // breach in the near cap: |x| < this ...
+        const float ColonyBreachTop = 430f;        // ... and y < this (ground at the breach is y = 0)
+        const float ColonyDowntownDepth = 4600f;   // downtown runs this far in from the near cap
+        const float ColonyDowntownHalf = 1005f;
+        const float ColonyLandHalf = 1550f;        // bottom land strip (60 deg of hull) half width
+        const string ColonyFolder = "Assets/Models/Colony";
+        const float BuildingTile = 28f;            // m per facade-texture tile (8 floors of 3.5 m)
+
+        class MeshAcc
+        {
+            public readonly System.Collections.Generic.List<Vector3> v = new System.Collections.Generic.List<Vector3>();
+            public readonly System.Collections.Generic.List<Vector3> n = new System.Collections.Generic.List<Vector3>();
+            public readonly System.Collections.Generic.List<Vector2> uv = new System.Collections.Generic.List<Vector2>();
+            public readonly System.Collections.Generic.List<int> t = new System.Collections.Generic.List<int>();
+
+            public void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 normal, Vector2 ua, Vector2 ub, Vector2 uc, Vector2 ud)
+            {
+                int i = v.Count;
+                v.Add(a); v.Add(b); v.Add(c); v.Add(d);
+                n.Add(normal); n.Add(normal); n.Add(normal); n.Add(normal);
+                uv.Add(ua); uv.Add(ub); uv.Add(uc); uv.Add(ud);
+                // Unity's front face of triangle (a,b,c) is along Cross(b-a, c-a); the
+                // diagonals give the same sign and also work for fan (degenerate) quads.
+                if (Vector3.Dot(Vector3.Cross(c - a, d - b), normal) >= 0f)
+                {
+                    t.Add(i); t.Add(i + 1); t.Add(i + 2);
+                    t.Add(i); t.Add(i + 2); t.Add(i + 3);
+                }
+                else
+                {
+                    t.Add(i); t.Add(i + 2); t.Add(i + 1);
+                    t.Add(i); t.Add(i + 3); t.Add(i + 2);
+                }
+            }
+
+            public GameObject Build(string name, Transform parent, Material mat)
+            {
+                if (v.Count == 0) return null;
+                UnityEngine.Mesh m = new UnityEngine.Mesh { name = name };
+                if (v.Count > 65000) m.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+                m.SetVertices(v); m.SetNormals(n); m.SetUVs(0, uv); m.SetTriangles(t, 0);
+                m.RecalculateBounds();
+                if (!s_colonyPreview)
+                {
+                    string path = ColonyFolder + "/" + name + ".asset";
+                    if (AssetDatabase.LoadAssetAtPath<UnityEngine.Mesh>(path) != null) AssetDatabase.DeleteAsset(path);
+                    AssetDatabase.CreateAsset(m, path);
+                }
+                GameObject go = new GameObject(name);
+                go.transform.SetParent(parent, false);
+                go.AddComponent<MeshFilter>().sharedMesh = m;
+                MeshRenderer r = go.AddComponent<MeshRenderer>();
+                r.sharedMaterial = mat;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                r.receiveShadows = false;
+                return go;
+            }
+        }
+
+        /// <summary>Per-material, per-1km-chunk mesh accumulators.</summary>
+        class ChunkedAcc
+        {
+            readonly System.Collections.Generic.Dictionary<long, MeshAcc> _d = new System.Collections.Generic.Dictionary<long, MeshAcc>();
+            public MeshAcc Get(int mat, float z)
+            {
+                long key = ((long)mat << 32) | (uint)Mathf.FloorToInt(z / 1000f);
+                if (!_d.TryGetValue(key, out MeshAcc a)) { a = new MeshAcc(); _d[key] = a; }
+                return a;
+            }
+            public void BuildAll(string prefix, Transform parent, Material[] mats)
+            {
+                foreach (var kv in _d)
+                {
+                    int mat = (int)(kv.Key >> 32);
+                    int chunk = (int)(kv.Key & 0xffffffff);
+                    kv.Value.Build(prefix + "_m" + mat + "_c" + chunk, parent, mats[mat]);
+                }
+            }
+        }
+
+        /// <summary>Cylinder band between angles a0..a1 (deg, 0 = +X, 90 = up) at 'radius'
+        /// around the axis through axis0 (along +Z), from z0 to z1 (relative to axis0.z).</summary>
+        static void AddCylinderBand(MeshAcc acc, Vector3 axis0, float radius, float a0, float a1, float z0, float z1,
+            int segs, bool inward, float uvScale, int zSegs = 1)
+        {
+            for (int zs = 0; zs < zSegs; zs++)
+            {
+                float za = Mathf.Lerp(z0, z1, zs / (float)zSegs), zb = Mathf.Lerp(z0, z1, (zs + 1) / (float)zSegs);
+                for (int i = 0; i < segs; i++)
+                {
+                    float t0 = Mathf.Lerp(a0, a1, i / (float)segs) * Mathf.Deg2Rad;
+                    float t1 = Mathf.Lerp(a0, a1, (i + 1) / (float)segs) * Mathf.Deg2Rad;
+                    Vector3 d0 = new Vector3(Mathf.Cos(t0), Mathf.Sin(t0), 0f);
+                    Vector3 d1 = new Vector3(Mathf.Cos(t1), Mathf.Sin(t1), 0f);
+                    Vector3 p00 = axis0 + d0 * radius + Vector3.forward * za, p01 = axis0 + d0 * radius + Vector3.forward * zb;
+                    Vector3 p10 = axis0 + d1 * radius + Vector3.forward * za, p11 = axis0 + d1 * radius + Vector3.forward * zb;
+                    Vector3 nrm = ((d0 + d1) * 0.5f).normalized * (inward ? -1f : 1f);
+                    float u0 = radius * t0 / uvScale, u1 = radius * t1 / uvScale;
+                    acc.Quad(p00, p10, p11, p01, nrm, new Vector2(u0, za / uvScale), new Vector2(u1, za / uvScale),
+                        new Vector2(u1, zb / uvScale), new Vector2(u0, zb / uvScale));
+                }
+            }
+        }
+
+        /// <summary>Flat ring (annulus) in the plane z = zPlane (relative to axis0), facing +/-Z.</summary>
+        static void AddAnnulus(MeshAcc acc, Vector3 axis0, float rIn, float rOut, float zPlane, int segs, float facing)
+        {
+            Vector3 nrm = Vector3.forward * facing;
+            for (int i = 0; i < segs; i++)
+            {
+                float t0 = i / (float)segs * Mathf.PI * 2f, t1 = (i + 1) / (float)segs * Mathf.PI * 2f;
+                Vector3 d0 = new Vector3(Mathf.Cos(t0), Mathf.Sin(t0), 0f), d1 = new Vector3(Mathf.Cos(t1), Mathf.Sin(t1), 0f);
+                Vector3 c = axis0 + Vector3.forward * zPlane;
+                Vector3 a = c + d0 * rIn, b = c + d1 * rIn, e = c + d1 * rOut, f = c + d0 * rOut;
+                acc.Quad(a, b, e, f, nrm, new Vector2(a.x, a.y) / 200f, new Vector2(b.x, b.y) / 200f, new Vector2(e.x, e.y) / 200f, new Vector2(f.x, f.y) / 200f);
+            }
+        }
+
+        /// <summary>End cap as a polar grid (so a breach can be cut out of it): tiles for
+        /// which skip(x, y) is true are left out. Both faces.</summary>
+        static void AddCapGrid(MeshAcc acc, Vector3 axis0, float radius, float zPlane, int rings, int sectors,
+            System.Func<float, float, bool> skip)
+        {
+            Vector3 c = axis0 + Vector3.forward * zPlane;
+            int prevSecs = 8;
+            for (int ri = 0; ri < rings; ri++)
+            {
+                float r0 = radius * ri / rings, r1 = radius * (ri + 1) / rings;
+                int secs = Mathf.Max(8, Mathf.RoundToInt(sectors * (ri + 1) / (float)rings));
+                // Rings have different sector counts, so their straight edges don't
+                // meet exactly - pull each ring's inner edge inside the previous
+                // ring's outer chords (hairline cracks let space show through).
+                if (ri > 0) r0 = Mathf.Max(0f, r0 * Mathf.Cos(Mathf.PI / prevSecs) - 1.5f);
+                prevSecs = secs;
+                for (int si = 0; si < secs; si++)
+                {
+                    float t0 = si / (float)secs * Mathf.PI * 2f, t1 = (si + 1) / (float)secs * Mathf.PI * 2f;
+                    Vector3 d0 = new Vector3(Mathf.Cos(t0), Mathf.Sin(t0), 0f), d1 = new Vector3(Mathf.Cos(t1), Mathf.Sin(t1), 0f);
+                    Vector3 a = c + d0 * r0, b = c + d1 * r0, e = c + d1 * r1, f = c + d0 * r1;
+                    Vector3 mid = (a + b + e + f) * 0.25f;
+                    if (skip != null && skip(mid.x, mid.y)) continue;
+                    Vector2 ua = new Vector2(a.x, a.y) / 200f, ub = new Vector2(b.x, b.y) / 200f, ue = new Vector2(e.x, e.y) / 200f, uf = new Vector2(f.x, f.y) / 200f;
+                    acc.Quad(a, b, e, f, Vector3.back, ua, ub, ue, uf);
+                    acc.Quad(a, b, e, f, Vector3.forward, ua, ub, ue, uf);
+                }
+            }
+        }
+
+        /// <summary>Axis-aligned box (no bottom), facade UVs scaled by size; roof mapped to a dark texel.</summary>
+        static void AddBuildingBox(MeshAcc acc, Vector3 mn, Vector3 mx, Vector2 uvOffset)
+        {
+            float T = BuildingTile;
+            Vector2 roof = new Vector2(0.004f, 0.004f);
+            float w = mx.x - mn.x, d = mx.z - mn.z, h = mx.y - mn.y;
+            Vector2 o = uvOffset;
+            acc.Quad(new Vector3(mx.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mx.z), Vector3.forward,
+                o, o + new Vector2(w / T, 0f), o + new Vector2(w / T, h / T), o + new Vector2(0f, h / T));
+            acc.Quad(new Vector3(mn.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mn.z), Vector3.back,
+                o, o + new Vector2(w / T, 0f), o + new Vector2(w / T, h / T), o + new Vector2(0f, h / T));
+            acc.Quad(new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mx.z), new Vector3(mx.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mn.z), Vector3.right,
+                o, o + new Vector2(d / T, 0f), o + new Vector2(d / T, h / T), o + new Vector2(0f, h / T));
+            acc.Quad(new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mn.z), new Vector3(mn.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mx.z), Vector3.left,
+                o, o + new Vector2(d / T, 0f), o + new Vector2(d / T, h / T), o + new Vector2(0f, h / T));
+            acc.Quad(new Vector3(mn.x, mx.y, mn.z), new Vector3(mx.x, mx.y, mn.z), new Vector3(mx.x, mx.y, mx.z), new Vector3(mn.x, mx.y, mx.z), Vector3.up,
+                roof, roof, roof, roof);
+        }
+
+        /// <summary>Plain box with all 6 faces and tiny UVs (solid-colour materials).</summary>
+        static void AddSolidBox(MeshAcc acc, Vector3 mn, Vector3 mx)
+        {
+            Vector2 z = Vector2.zero;
+            acc.Quad(new Vector3(mx.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mx.z), Vector3.forward, z, z, z, z);
+            acc.Quad(new Vector3(mn.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mn.z), Vector3.back, z, z, z, z);
+            acc.Quad(new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mx.z), new Vector3(mx.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mn.z), Vector3.right, z, z, z, z);
+            acc.Quad(new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mn.z), new Vector3(mn.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mx.z), Vector3.left, z, z, z, z);
+            acc.Quad(new Vector3(mn.x, mx.y, mn.z), new Vector3(mx.x, mx.y, mn.z), new Vector3(mx.x, mx.y, mx.z), new Vector3(mn.x, mx.y, mx.z), Vector3.up, z, z, z, z);
+            acc.Quad(new Vector3(mn.x, mn.y, mx.z), new Vector3(mx.x, mn.y, mx.z), new Vector3(mx.x, mn.y, mn.z), new Vector3(mn.x, mn.y, mn.z), Vector3.down, z, z, z, z);
+        }
+
+        /// <summary>Four-sided tree (pyramid on a short trunk block).</summary>
+        static void AddTree(MeshAcc acc, Vector3 basePos, float h, float r)
+        {
+            Vector3 top = basePos + Vector3.up * h;
+            Vector3 b0 = basePos + new Vector3(-r, h * 0.25f, -r), b1 = basePos + new Vector3(r, h * 0.25f, -r);
+            Vector3 b2 = basePos + new Vector3(r, h * 0.25f, r), b3 = basePos + new Vector3(-r, h * 0.25f, r);
+            Vector2 z = Vector2.zero;
+            acc.Quad(b0, b1, top, top, Vector3.back, z, z, z, z);
+            acc.Quad(b1, b2, top, top, Vector3.right, z, z, z, z);
+            acc.Quad(b2, b3, top, top, Vector3.forward, z, z, z, z);
+            acc.Quad(b3, b0, top, top, Vector3.left, z, z, z, z);
+        }
+
+        /// <summary>Generated texture, saved as a PNG asset (repeat wrap).</summary>
+        /// <summary>Preview build (BuildColonyPreview): meshes/textures stay in memory, no asset writes.</summary>
+        static bool s_colonyPreview;
+
+        /// <summary>Builds ONLY the space colony into the active scene with nothing
+        /// written to the project (meshes and textures stay in memory) - for looking
+        /// at it in a scratch scene. The real build is Gundam > Build Cockpit Scene.</summary>
+        public static ColonyStructure BuildColonyPreview()
+        {
+            s_colonyPreview = true;
+            try { return BuildColony(); }
+            finally { s_colonyPreview = false; }
+        }
+
+        static Texture2D MakeColonyTexture(string name, int size, System.Func<int, int, System.Random, Color> pixel, int seed)
+        {
+            Texture2D tex = new Texture2D(size, size, TextureFormat.RGBA32, true);
+            System.Random rnd = new System.Random(seed);
+            Color[] px = new Color[size * size];
+            for (int y = 0; y < size; y++)
+                for (int x = 0; x < size; x++)
+                {
+                    Color c = pixel(x, y, rnd);
+                    c.a = 1f;
+                    px[y * size + x] = c;
+                }
+            tex.SetPixels(px);
+            if (s_colonyPreview)
+            {
+                tex.wrapMode = TextureWrapMode.Repeat;
+                tex.anisoLevel = 4;
+                tex.Apply(true);
+                return tex;
+            }
+            tex.Apply();
+            System.IO.Directory.CreateDirectory(ColonyFolder);
+            string path = ColonyFolder + "/" + name + ".png";
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            UnityEngine.Object.DestroyImmediate(tex);
+            AssetDatabase.ImportAsset(path);
+            TextureImporter ti = AssetImporter.GetAtPath(path) as TextureImporter;
+            if (ti != null)
+            {
+                ti.wrapMode = TextureWrapMode.Repeat;
+                ti.filterMode = FilterMode.Bilinear;
+                ti.maxTextureSize = size;
+                ti.mipmapEnabled = true;
+                ti.anisoLevel = 4;
+                ti.SaveAndReimport();
+            }
+            return AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+        }
+
+        /// <summary>Facade: an 8 x 8 grid of window cells, 'lit' of them lit.</summary>
+        static Texture2D MakeFacadeTexture(string name, Color wall, Color frame, Color lit1, Color lit2, Color unlit, float lit,
+            int winX0, int winX1, int winY0, int winY1, int seed)
+        {
+            const int N = 128, cell = 16;
+            bool[,] on = new bool[8, 8];
+            Color[,] col = new Color[8, 8];
+            System.Random r0 = new System.Random(seed * 7 + 1);
+            for (int cy = 0; cy < 8; cy++)
+                for (int cx = 0; cx < 8; cx++)
+                {
+                    on[cx, cy] = r0.NextDouble() < lit;
+                    float b = 0.5f + (float)r0.NextDouble() * 0.5f;
+                    col[cx, cy] = (r0.NextDouble() < 0.7 ? lit1 : lit2) * b;
+                }
+            return MakeColonyTexture(name, N, (x, y, rnd) =>
+            {
+                int cx = x / cell, cy = y / cell, lx = x % cell, ly = y % cell;
+                if (x < 2 && y < 2) return new Color(0.05f, 0.05f, 0.06f); // dark texel for roofs
+                if (ly == 0 || ly == cell - 1) return frame;                  // floor slab line
+                if (lx >= winX0 && lx < winX1 && ly >= winY0 && ly < winY1) return on[cx, cy] ? col[cx, cy] : unlit;
+                return wall;
+            }, seed);
+        }
+
+        static Material MakeTexturedMat(Color tint, Texture2D tex, float emission, float smoothness = 0.3f)
+        {
+            Material m = MakeMat(tint);
+            if (m.HasProperty("_Smoothness")) m.SetFloat("_Smoothness", smoothness);
+            if (tex != null)
+            {
+                m.mainTexture = tex;
+                if (m.HasProperty("_BaseMap")) m.SetTexture("_BaseMap", tex);
+                if (emission > 0f)
+                {
+                    m.EnableKeyword("_EMISSION");
+                    m.SetTexture("_EmissionMap", tex);
+                    m.SetColor("_EmissionColor", Color.white * emission);
+                    m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+                }
+            }
+            return m;
+        }
+
+        // ----- Colony v3 detail helpers (per "디테일을 더 살려줘 지금은 너무 비현실적이야") -----
+
+        static float Hash01(int x, int y, int s)
+        {
+            unchecked
+            {
+                int h = x * 374761393 + y * 668265263 + s * 982451653;
+                h = (h ^ (h >> 13)) * 1274126177;
+                return ((h ^ (h >> 16)) & 0xffff) / 65535f;
+            }
+        }
+
+        struct FacadeStyle
+        {
+            public Color wall, wall2, frame, glassTop, glassBottom;
+            public int wx0, wx1, wy0, wy1;
+            public float lit, grime;
+            public bool brick, balcony;
+        }
+
+        /// <summary>0 office concrete, 1 glass curtain wall, 2 residential, 3 brick, 4 dark modern.</summary>
+        static FacadeStyle FacadeStyleFor(int style)
+        {
+            switch (style)
+            {
+                case 1: return new FacadeStyle { wall = new Color(0.33f, 0.36f, 0.4f), wall2 = new Color(0.28f, 0.3f, 0.33f), frame = new Color(0.62f, 0.65f, 0.68f),
+                    glassTop = new Color(0.62f, 0.74f, 0.86f), glassBottom = new Color(0.16f, 0.24f, 0.33f), wx0 = 1, wx1 = 31, wy0 = 5, wy1 = 31, lit = 0.12f, grime = 0.05f };
+                case 2: return new FacadeStyle { wall = new Color(0.8f, 0.75f, 0.66f), wall2 = new Color(0.66f, 0.62f, 0.56f), frame = new Color(0.9f, 0.9f, 0.88f),
+                    glassTop = new Color(0.5f, 0.58f, 0.66f), glassBottom = new Color(0.14f, 0.16f, 0.2f), wx0 = 8, wx1 = 24, wy0 = 10, wy1 = 27, lit = 0.2f, grime = 0.18f, balcony = true };
+                case 3: return new FacadeStyle { wall = new Color(0.56f, 0.32f, 0.24f), wall2 = new Color(0.62f, 0.6f, 0.56f), frame = new Color(0.86f, 0.84f, 0.8f),
+                    glassTop = new Color(0.46f, 0.54f, 0.62f), glassBottom = new Color(0.12f, 0.13f, 0.16f), wx0 = 9, wx1 = 23, wy0 = 9, wy1 = 27, lit = 0.18f, grime = 0.22f, brick = true };
+                case 4: return new FacadeStyle { wall = new Color(0.12f, 0.13f, 0.15f), wall2 = new Color(0.2f, 0.21f, 0.23f), frame = new Color(0.78f, 0.8f, 0.82f),
+                    glassTop = new Color(0.4f, 0.48f, 0.58f), glassBottom = new Color(0.06f, 0.08f, 0.11f), wx0 = 2, wx1 = 30, wy0 = 6, wy1 = 30, lit = 0.1f, grime = 0.04f };
+                default: return new FacadeStyle { wall = new Color(0.64f, 0.64f, 0.62f), wall2 = new Color(0.5f, 0.5f, 0.49f), frame = new Color(0.3f, 0.31f, 0.33f),
+                    glassTop = new Color(0.55f, 0.65f, 0.76f), glassBottom = new Color(0.12f, 0.16f, 0.22f), wx0 = 3, wx1 = 29, wy0 = 9, wy1 = 28, lit = 0.16f, grime = 0.2f };
+            }
+        }
+
+        /// <summary>Facade texture (8 floors x 8 bays, 256 px = 28 m) with sky
+        /// reflections in the glass, frames, mullions, blinds, slab bands, vertical
+        /// grime streaks and a few lit rooms - plus a matching emission map that
+        /// only lights those rooms (the walls themselves never glow).</summary>
+        static void MakeFacade(string name, int style, int seed, out Texture2D baseTex, out Texture2D emisTex)
+        {
+            FacadeStyle st = FacadeStyleFor(style);
+            const int N = 256, cell = 32;
+            bool[,] on = new bool[8, 8];
+            float[,] blind = new float[8, 8];
+            Color[,] litCol = new Color[8, 8];
+            System.Random r0 = new System.Random(seed * 7 + 1);
+            for (int cy = 0; cy < 8; cy++)
+                for (int cx = 0; cx < 8; cx++)
+                {
+                    on[cx, cy] = r0.NextDouble() < st.lit;
+                    blind[cx, cy] = r0.NextDouble() < 0.35 ? 0.25f + 0.5f * (float)r0.NextDouble() : 0f;
+                    float b = 0.6f + 0.4f * (float)r0.NextDouble();
+                    litCol[cx, cy] = (r0.NextDouble() < 0.75 ? new Color(1f, 0.86f, 0.62f) : new Color(0.82f, 0.9f, 1f)) * b;
+                }
+            baseTex = MakeColonyTexture(name, N, (x, y, rnd) =>
+            {
+                if (x < 3 && y < 3) return new Color(0.2f, 0.2f, 0.21f); // roof texel
+                int cx = x / cell, cy = y / cell, lx = x % cell, ly = y % cell;
+                float grime = st.grime * Mathf.Clamp01(Mathf.PerlinNoise(x * 0.11f + seed, y * 0.012f) * 1.4f - 0.3f);
+                float n = ((float)rnd.NextDouble() - 0.5f) * 0.035f;
+                bool inWin = lx >= st.wx0 && lx < st.wx1 && ly >= st.wy0 && ly < st.wy1;
+                if (inWin)
+                {
+                    bool edge = lx == st.wx0 || lx == st.wx1 - 1 || ly == st.wy0 || ly == st.wy1 - 1;
+                    bool mullion = (st.wx1 - st.wx0) > 16 && (lx == (st.wx0 + st.wx1) / 2);
+                    if (edge || mullion) return st.frame * (1f - grime * 0.6f);
+                    float v = (ly - st.wy0) / (float)(st.wy1 - st.wy0);
+                    if (on[cx, cy]) return litCol[cx, cy] * 0.9f;
+                    float bl = blind[cx, cy];
+                    if (bl > 0f && v > 1f - bl) return new Color(0.74f, 0.71f, 0.62f) * (0.92f + n);
+                    Color g = Color.Lerp(st.glassBottom, st.glassTop, v * v);
+                    float band = ((x + y * 0.7f + seed * 13) % 90f) / 90f;
+                    float streak = Mathf.Max(0f, 1f - Mathf.Abs(band - 0.5f) * 9f) * 0.1f;
+                    return g + new Color(streak + n, streak + n, streak + n);
+                }
+                Color w = ly < 4 ? st.wall2 : st.wall;
+                if (st.balcony && ly >= st.wy0 - 5 && ly < st.wy0 && lx >= st.wx0 - 4 && lx < st.wx1 + 4) w = ly == st.wy0 - 5 ? st.frame : st.wall2 * 0.85f;
+                if (st.brick && ly >= 4)
+                {
+                    int by = y / 4, off = (by % 2) * 4;
+                    bool mortar = y % 4 == 0 || (x + off) % 8 == 0;
+                    w = mortar ? st.wall2 : st.wall * (0.86f + 0.26f * Hash01((x + off) / 8, by, seed));
+                }
+                return w * (1f - grime) + new Color(n, n, n);
+            }, seed);
+            emisTex = MakeColonyTexture(name + "_Emission", N, (x, y, rnd) =>
+            {
+                int cx = x / cell, cy = y / cell, lx = x % cell, ly = y % cell;
+                bool inWin = lx > st.wx0 && lx < st.wx1 - 1 && ly > st.wy0 && ly < st.wy1 - 1;
+                return inWin && on[cx, cy] ? litCol[cx, cy] : Color.black;
+            }, seed + 1);
+        }
+
+        /// <summary>Street-level shop fronts (one 256 px tile = 28 m x one band): lit
+        /// display windows between pillars, a colored sign strip above each shop.</summary>
+        static void MakeStorefront(out Texture2D baseTex, out Texture2D emisTex)
+        {
+            Color[] signs = { new Color(0.55f, 0.2f, 0.16f), new Color(0.18f, 0.3f, 0.5f), new Color(0.7f, 0.6f, 0.35f),
+                              new Color(0.22f, 0.4f, 0.28f), new Color(0.85f, 0.84f, 0.8f), new Color(0.3f, 0.3f, 0.32f) };
+            System.Func<int, int, bool, Color> px = (x, y, emis) =>
+            {
+                int shop = x / 64, lx = x % 64;
+                Color sign = signs[(shop * 7 + 3) % signs.Length];
+                bool pillar = lx < 5;
+                if (pillar) return emis ? Color.black : new Color(0.55f, 0.54f, 0.52f);
+                if (y > 200) return emis ? Color.black : new Color(0.5f, 0.5f, 0.49f);         // fascia above
+                if (y > 178) return emis ? sign * 0.35f : sign;                                  // sign band
+                if (y > 162) return emis ? Color.black : new Color(0.3f, 0.3f, 0.32f);         // awning edge
+                bool door = lx > 26 && lx < 40 && y < 120;
+                if (door) return emis ? new Color(0.5f, 0.45f, 0.35f) : new Color(0.25f, 0.24f, 0.22f);
+                if (y < 14) return emis ? Color.black : new Color(0.45f, 0.45f, 0.44f);        // plinth
+                float v = y / 162f;
+                Color inside = Color.Lerp(new Color(0.95f, 0.85f, 0.65f), new Color(0.75f, 0.8f, 0.85f), v);
+                return emis ? inside * 0.75f : inside * 0.8f;
+            };
+            baseTex = MakeColonyTexture("Colony_Storefront", 256, (x, y, r) => px(x, y, false), 31);
+            emisTex = MakeColonyTexture("Colony_Storefront_Emission", 256, (x, y, r) => px(x, y, true), 32);
+        }
+
+        static Material MakeEmissionMapMat(Texture2D baseTex, Texture2D emisTex, float emission, float smoothness, float metallic = 0f)
+        {
+            Material m = MakeTexturedMat(Color.white, baseTex, 0f, smoothness);
+            if (m.HasProperty("_Metallic")) m.SetFloat("_Metallic", metallic);
+            if (emisTex != null)
+            {
+                m.EnableKeyword("_EMISSION");
+                m.SetTexture("_EmissionMap", emisTex);
+                m.SetColor("_EmissionColor", Color.white * emission);
+                m.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+            }
+            return m;
+        }
+
+        /// <summary>Box band (4 sides, no top/bottom), u = length / uTile, v 0..1 over its height.</summary>
+        static void AddBandBox(MeshAcc acc, Vector3 mn, Vector3 mx, float uTile, float u0)
+        {
+            float w = (mx.x - mn.x) / uTile, d = (mx.z - mn.z) / uTile;
+            acc.Quad(new Vector3(mx.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mx.z), Vector3.forward,
+                new Vector2(u0, 0f), new Vector2(u0 + w, 0f), new Vector2(u0 + w, 1f), new Vector2(u0, 1f));
+            acc.Quad(new Vector3(mn.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mn.z), Vector3.back,
+                new Vector2(u0, 0f), new Vector2(u0 + w, 0f), new Vector2(u0 + w, 1f), new Vector2(u0, 1f));
+            acc.Quad(new Vector3(mx.x, mn.y, mn.z), new Vector3(mx.x, mn.y, mx.z), new Vector3(mx.x, mx.y, mx.z), new Vector3(mx.x, mx.y, mn.z), Vector3.right,
+                new Vector2(u0, 0f), new Vector2(u0 + d, 0f), new Vector2(u0 + d, 1f), new Vector2(u0, 1f));
+            acc.Quad(new Vector3(mn.x, mn.y, mx.z), new Vector3(mn.x, mn.y, mn.z), new Vector3(mn.x, mx.y, mn.z), new Vector3(mn.x, mx.y, mx.z), Vector3.left,
+                new Vector2(u0, 0f), new Vector2(u0 + d, 0f), new Vector2(u0 + d, 1f), new Vector2(u0, 1f));
+        }
+
+        /// <summary>Box with every UV at one point (for picking a color from a palette texture).</summary>
+        static void AddColorBox(MeshAcc acc, Vector3 mn, Vector3 mx, Vector2 uv)
+        {
+            int start = acc.uv.Count;
+            AddSolidBox(acc, mn, mx);
+            for (int i = start; i < acc.uv.Count; i++) acc.uv[i] = uv;
+        }
+
+        /// <summary>Oriented box: center, half extents along (right, up, forward).</summary>
+        static void AddOrientedBox(MeshAcc acc, Vector3 c, Vector3 right, Vector3 up, Vector3 fwd, Vector3 half, Vector2 uv)
+        {
+            Vector3 r = right.normalized * half.x, u = up.normalized * half.y, f = fwd.normalized * half.z;
+            Vector3[] p =
+            {
+                c - r - u - f, c + r - u - f, c + r + u - f, c - r + u - f,
+                c - r - u + f, c + r - u + f, c + r + u + f, c - r + u + f,
+            };
+            acc.Quad(p[0], p[1], p[2], p[3], -f.normalized, uv, uv, uv, uv);
+            acc.Quad(p[5], p[4], p[7], p[6], f.normalized, uv, uv, uv, uv);
+            acc.Quad(p[1], p[5], p[6], p[2], r.normalized, uv, uv, uv, uv);
+            acc.Quad(p[4], p[0], p[3], p[7], -r.normalized, uv, uv, uv, uv);
+            acc.Quad(p[3], p[2], p[6], p[7], u.normalized, uv, uv, uv, uv);
+            acc.Quad(p[4], p[5], p[1], p[0], -u.normalized, uv, uv, uv, uv);
+        }
+
+        /// <summary>A painted mark lying on the curved land (x0..x1, z0..z1).</summary>
+        static void AddGroundPaint(MeshAcc acc, Vector3 axis0, float x0, float x1, float z0, float z1)
+        {
+            AddCylinderBand(acc, axis0, ColonyRadius - 0.15f, LandAngle(x0), LandAngle(x1), z0 - axis0.z, z1 - axis0.z, 1, true, 30f);
+        }
+
+        const string ColonyPropFolder = "Assets/Models/ColonyProps";
+        const int ColonyDetailLayer = 27; // street-level detail, distance-culled by ColonyAtmosphere
+
+        /// <summary>
+        /// VARCO models from Assets/Models/ColonyProps (per "파공 주변 잔해나 항구
+        /// 크레인 같은 외관 소품"): wreckage around the breach (always shown), port
+        /// modules around the near docking spindle, cranes on the near end cap and
+        /// antenna towers on the hull (exterior, hidden from inside), and rubble of
+        /// collapsed buildings just inside the breach (collidable). Missing models
+        /// are skipped. Returns how many were placed.
+        /// </summary>
+        static int PlaceColonyVarcoProps(Transform root, Transform exterior, Transform breachRoot, Vector3 axis0,
+            System.Action<Vector3, Vector3> collide)
+        {
+            GameObject wreck = LoadColonyProp("BreachWreck"), crane = LoadColonyProp("DockingCrane"), port = LoadColonyProp("PortModule");
+            GameObject antenna = LoadColonyProp("HullAntenna"), rubble = LoadColonyProp("Rubble");
+            System.Random r = new System.Random(515);
+            int n = 0;
+            float zN = axis0.z, R = ColonyRadius;
+            Bounds b;
+
+            // Wreckage blown out around the breach rim, jutting from the cap.
+            if (wreck != null)
+            {
+                for (int i = 0; i < 6; i++)
+                {
+                    float ang = Mathf.PI * (0.06f + 0.88f * i / 5f);
+                    Vector3 p = new Vector3(Mathf.Cos(ang) * (ColonyBreachHalfWidth + 55f), Mathf.Max(25f, Mathf.Sin(ang) * (ColonyBreachTop + 45f)), zN - 8f);
+                    Vector3 outDir = new Vector3(p.x, p.y - 120f, 0f).normalized;
+                    Vector3 up = (-Vector3.forward * 0.7f + outDir * 0.7f + Random01Vec(r) * 0.3f).normalized;
+                    b = PlaceColonyProp(wreck, breachRoot, p, up, (float)r.NextDouble() * 360f, 80f + (float)r.NextDouble() * 60f, "BreachWreck_" + i, true);
+                    if (b.size != Vector3.zero) n++;
+                }
+            }
+            // Rubble of collapsed buildings just inside the breach.
+            if (rubble != null)
+            {
+                Transform inner = new GameObject("InteriorProps").transform;
+                inner.SetParent(root, false);
+                float[] xs = { -200f, 175f, -300f, 290f };
+                float[] zs = { 140f, 220f, 330f, 120f };
+                for (int i = 0; i < xs.Length; i++)
+                {
+                    Vector3 p = new Vector3(xs[i], ColonyGroundY(xs[i]) - 1.5f, zN + zs[i]);
+                    b = PlaceColonyProp(rubble, inner, p, Vector3.up, (float)r.NextDouble() * 360f, 70f + (float)r.NextDouble() * 30f, "Rubble_" + i, true);
+                    if (b.size == Vector3.zero) continue;
+                    collide(b.min, b.max);
+                    n++;
+                }
+            }
+            // Port modules around the near docking spindle (radius 280, 900 m long).
+            if (port != null)
+            {
+                for (int i = 0; i < 6; i++)
+                {
+                    float ang = (i * 60f + 30f) * Mathf.Deg2Rad;
+                    Vector3 d = new Vector3(Mathf.Cos(ang), Mathf.Sin(ang), 0f);
+                    Vector3 p = axis0 + d * 281f + Vector3.forward * (-280f - (i % 2) * 330f);
+                    b = PlaceColonyProp(port, exterior, p, d, 0f, 260f, "PortModule_" + i);
+                    if (b.size != Vector3.zero) n++;
+                }
+            }
+            // Cranes standing out of the near end cap's outer face.
+            if (crane != null)
+            {
+                float[] angs = { 20f, 70f, 110f, 160f, 200f, 340f };
+                for (int i = 0; i < angs.Length; i++)
+                {
+                    float ang = angs[i] * Mathf.Deg2Rad;
+                    float rr = 700f + (i % 3) * 420f;
+                    Vector3 p = axis0 + new Vector3(Mathf.Cos(ang), Mathf.Sin(ang), 0f) * rr + Vector3.forward * -3f;
+                    b = PlaceColonyProp(crane, exterior, p, -Vector3.forward, angs[i] + 90f, 460f, "DockingCrane_" + i);
+                    if (b.size != Vector3.zero) n++;
+                }
+            }
+            // Antenna / sensor towers on the outer hull's land strips.
+            if (antenna != null)
+            {
+                float[] angs = { 30f, 150f, 270f, 12f, 138f, 255f };
+                float[] zs = { 1200f, 3600f, 6000f, 8400f, 10200f, 4800f };
+                for (int i = 0; i < angs.Length; i++)
+                {
+                    float ang = angs[i] * Mathf.Deg2Rad;
+                    Vector3 d = new Vector3(Mathf.Cos(ang), Mathf.Sin(ang), 0f);
+                    Vector3 p = axis0 + d * (R + 2f) + Vector3.forward * zs[i];
+                    b = PlaceColonyProp(antenna, exterior, p, d, (float)r.NextDouble() * 360f, 300f, "HullAntenna_" + i);
+                    if (b.size != Vector3.zero) n++;
+                }
+            }
+            return n;
+        }
+
+        static GameObject LoadColonyProp(string name)
+        {
+            if (!AssetDatabase.IsValidFolder(ColonyPropFolder)) return null;
+            foreach (string g in AssetDatabase.FindAssets("t:Model", new[] { ColonyPropFolder }))
+            {
+                GameObject m = AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(g));
+                if (m != null && m.name == name) return m;
+            }
+            return null;
+        }
+
+        /// <summary>Places a VARCO prop: its largest dimension = size, its base on
+        /// 'basePoint', its up axis along 'up', turned 'yaw' about it. Returns the
+        /// world bounds (for collision), or an empty Bounds if the model is missing.</summary>
+        static Bounds PlaceColonyProp(GameObject model, Transform parent, Vector3 basePoint, Vector3 up, float yaw, float size, string label, bool sinkBase = false)
+        {
+            if (model == null) return new Bounds();
+            GameObject holder = new GameObject(label);
+            holder.transform.SetParent(parent, false);
+            GameObject inst = (GameObject)PrefabUtility.InstantiatePrefab(model);
+            inst.transform.SetParent(holder.transform, false);
+            inst.transform.localPosition = Vector3.zero;
+            foreach (Collider col in inst.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(col);
+            Renderer[] rends = inst.GetComponentsInChildren<Renderer>(true);
+            if (rends.Length == 0) { UnityEngine.Object.DestroyImmediate(holder); return new Bounds(); }
+            Bounds b = rends[0].bounds;
+            for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+            float maxDim = Mathf.Max(b.size.x, Mathf.Max(b.size.y, b.size.z));
+            float s = maxDim > 1e-4f ? size / maxDim : 1f;
+            // Model base (bottom center, model space at holder identity) to the origin.
+            Vector3 baseLocal = new Vector3(b.center.x, b.min.y + (sinkBase ? b.size.y * 0.08f : 0f), b.center.z);
+            inst.transform.localPosition = -baseLocal;
+            holder.transform.localScale = Vector3.one * s;
+            holder.transform.rotation = Quaternion.FromToRotation(Vector3.up, up.normalized) * Quaternion.Euler(0f, yaw, 0f);
+            holder.transform.position = basePoint;
+            foreach (Renderer r in rends)
+            {
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                r.receiveShadows = false;
+            }
+            b = rends[0].bounds;
+            for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+            return b;
+        }
+
+        static Vector3 Random01Vec(System.Random r) =>
+            new Vector3((float)r.NextDouble() - 0.5f, (float)r.NextDouble() - 0.5f, (float)r.NextDouble() - 0.5f) * 2f;
+
+        /// <summary>Simple gable roof (two slopes + two gable ends) over a box top, ridge along the longer side.</summary>
+        static void AddGableRoof(MeshAcc acc, Vector3 mn, Vector3 mx, float h, Vector2 uv)
+        {
+            float y0 = mx.y, y1 = mx.y + h;
+            bool alongZ = (mx.z - mn.z) >= (mx.x - mn.x);
+            float o = 0.6f; // eaves overhang
+            if (alongZ)
+            {
+                float cx = (mn.x + mx.x) * 0.5f;
+                Vector3 a = new Vector3(mn.x - o, y0, mn.z - o), b = new Vector3(mn.x - o, y0, mx.z + o), c = new Vector3(cx, y1, mx.z + o), d = new Vector3(cx, y1, mn.z - o);
+                Vector3 e = new Vector3(mx.x + o, y0, mn.z - o), f = new Vector3(mx.x + o, y0, mx.z + o);
+                acc.Quad(a, b, c, d, new Vector3(-h, cx - mn.x, 0f).normalized, uv, uv, uv, uv);
+                acc.Quad(f, e, d, c, new Vector3(h, cx - mn.x, 0f).normalized, uv, uv, uv, uv);
+                acc.Quad(a, e, d, d, Vector3.back, uv, uv, uv, uv);
+                acc.Quad(f, b, c, c, Vector3.forward, uv, uv, uv, uv);
+            }
+            else
+            {
+                float cz = (mn.z + mx.z) * 0.5f;
+                Vector3 a = new Vector3(mn.x - o, y0, mn.z - o), b = new Vector3(mx.x + o, y0, mn.z - o), c = new Vector3(mx.x + o, y1, cz), d = new Vector3(mn.x - o, y1, cz);
+                Vector3 e = new Vector3(mn.x - o, y0, mx.z + o), f = new Vector3(mx.x + o, y0, mx.z + o);
+                acc.Quad(a, b, c, d, new Vector3(0f, cz - mn.z, -h).normalized, uv, uv, uv, uv);
+                acc.Quad(f, e, d, c, new Vector3(0f, cz - mn.z, h).normalized, uv, uv, uv, uv);
+                acc.Quad(e, a, d, d, Vector3.left, uv, uv, uv, uv);
+                acc.Quad(b, f, c, c, Vector3.right, uv, uv, uv, uv);
+            }
+        }
+
+        /// <summary>AddTree with every UV at one palette point.</summary>
+        static void AddTreeUV(MeshAcc acc, Vector3 basePos, float h, float r, Vector2 uv)
+        {
+            int start = acc.uv.Count;
+            AddTree(acc, basePos, h, r);
+            for (int i = start; i < acc.uv.Count; i++) acc.uv[i] = uv;
+        }
+
+        const string ColonyBuildingFolder = "Assets/Models/ColonyBuildings";
+        const int ColonyLandmarkUsesPerModel = 2;
+
+        /// <summary>VARCO building models for the colony city (empty if none).</summary>
+        static GameObject[] LoadColonyBuildingModels()
+        {
+            if (!AssetDatabase.IsValidFolder(ColonyBuildingFolder)) return new GameObject[0];
+            return AssetDatabase.FindAssets("t:Model", new[] { ColonyBuildingFolder })
+                .Select(g => AssetDatabase.LoadAssetAtPath<GameObject>(AssetDatabase.GUIDToAssetPath(g)))
+                .Where(m => m != null)
+                .OrderBy(m => m.name)
+                .ToArray();
+        }
+
+        /// <summary>Angle (deg) of the bottom land at x (270 = straight down from the axis).</summary>
+        static float LandAngle(float x) => 270f + Mathf.Asin(Mathf.Clamp(x / ColonyRadius, -1f, 1f)) * Mathf.Rad2Deg;
+
+        static float ColonyGroundY(float x) => ColonyRadius - Mathf.Sqrt(Mathf.Max(0f, ColonyRadius * ColonyRadius - x * x));
+
+        static ColonyStructure BuildColony()
+        {
+            if (!s_colonyPreview)
+            {
+                System.IO.Directory.CreateDirectory(ColonyFolder);
+                AssetDatabase.Refresh();
+                // Previously generated colony meshes (chunk counts change between builds).
+                foreach (string g in AssetDatabase.FindAssets("t:Mesh", new[] { ColonyFolder }))
+                    AssetDatabase.DeleteAsset(AssetDatabase.GUIDToAssetPath(g));
+            }
+            GameObject root = new GameObject("SpaceColony");
+            Vector3 axis0 = new Vector3(0f, ColonyRadius, ColonyNearZ); // near cap, on the axis; ground at x=0 is y=0
+            float R = ColonyRadius, L = ColonyLength, zN = ColonyNearZ, zF = ColonyNearZ + ColonyLength;
+            System.Random rnd = new System.Random(80085);
+
+            // --- Textures (v3, per "디테일을 더 살려줘 지금은 너무 비현실적이야": 256 px,
+            //     weathering, sky reflections, and emission maps that light only the
+            //     lit rooms / shops - the walls themselves no longer glow) ---
+            string[] facNames = { "Facade_Office", "Facade_Glass", "Facade_Residential", "Facade_Brick", "Facade_DarkModern" };
+            Texture2D[] facBase = new Texture2D[5], facEmis = new Texture2D[5];
+            for (int i = 0; i < 5; i++) MakeFacade(facNames[i], i, 11 + i, out facBase[i], out facEmis[i]);
+            MakeStorefront(out Texture2D shopBase, out Texture2D shopEmis);
+            Texture2D groundTex = MakeColonyTexture("Colony_Asphalt", 256, (x, y, r) =>
+            {
+                float blot = Mathf.PerlinNoise(x * 0.03f, y * 0.03f) * 0.05f + Mathf.PerlinNoise(x * 0.15f + 7f, y * 0.15f) * 0.03f;
+                float n = 0.12f + blot + (float)r.NextDouble() * 0.035f;
+                float crack = Mathf.Abs(Mathf.PerlinNoise(x * 0.045f + 3f, y * 0.045f + 9f) - 0.5f);
+                if (crack < 0.012f) n *= 0.6f;
+                return new Color(n, n, n * 1.04f);
+            }, 21);
+            Texture2D paverTex = MakeColonyTexture("Colony_Pavers", 128, (x, y, r) =>
+            {
+                bool joint = x % 32 == 0 || y % 16 == 0;
+                float n = 0.55f + (float)r.NextDouble() * 0.05f + (Hash01(x / 32, y / 16, 5) - 0.5f) * 0.08f;
+                if (joint) n *= 0.7f;
+                return new Color(n, n * 0.98f, n * 0.94f);
+            }, 25);
+            Texture2D grassTex = MakeColonyTexture("Colony_Grass", 128, (x, y, r) =>
+            {
+                float p = Mathf.PerlinNoise(x * 0.08f, y * 0.08f);
+                float n = (float)r.NextDouble() * 0.06f;
+                return new Color(0.16f + p * 0.08f + n, 0.3f + p * 0.12f + n, 0.12f + n * 0.5f);
+            }, 26);
+            // 4 x 4 color palette for cars, roofs, poles and trees.
+            Color[] pal =
+            {
+                new Color(0.85f, 0.85f, 0.83f), new Color(0.55f, 0.57f, 0.6f), new Color(0.08f, 0.08f, 0.09f), new Color(0.6f, 0.08f, 0.07f),
+                new Color(0.12f, 0.22f, 0.45f), new Color(0.9f, 0.7f, 0.1f), new Color(0.12f, 0.25f, 0.16f), new Color(0.33f, 0.35f, 0.22f),
+                new Color(0.42f, 0.16f, 0.12f), new Color(0.24f, 0.26f, 0.3f), new Color(0.62f, 0.3f, 0.18f), new Color(0.04f, 0.035f, 0.03f),
+                new Color(0.2f, 0.42f, 0.7f), new Color(0.3f, 0.2f, 0.12f), new Color(0.1f, 0.24f, 0.09f), new Color(0.2f, 0.36f, 0.14f),
+            };
+            Texture2D palTex = MakeColonyTexture("Colony_Palette", 64, (x, y, r) => pal[(y / 16) * 4 + (x / 16)], 27);
+            System.Func<int, Vector2> Pal = i => new Vector2(((i % 4) + 0.5f) / 4f, ((i / 4) + 0.5f) / 4f);
+            // Overhead land seen from below: a daytime city / farmland pattern (the
+            // air-haze from ColonyAtmosphere does the rest).
+            Texture2D cityLightsTex = MakeColonyTexture("Colony_UpperLandDay", 256, (x, y, r) =>
+            {
+                int bx = x / 32, by = y / 32, lx = x % 32, ly = y % 32;
+                bool mainRoad = x % 128 < 3 || y % 128 < 3;
+                bool road = lx < 2 || ly < 2;
+                if (mainRoad) return new Color(0.5f, 0.5f, 0.5f);
+                if (road) return new Color(0.4f, 0.4f, 0.41f);
+                float kind = Hash01(bx, by, 3);
+                if (kind < 0.18f) return new Color(0.2f, 0.34f, 0.16f) * (0.9f + 0.2f * (float)r.NextDouble());  // park
+                if (kind < 0.22f) return new Color(0.2f, 0.32f, 0.42f);                                            // pond
+                // rooftops: small random squares
+                float h = Hash01(x / 6, y / 6, 4);
+                float g = 0.42f + h * 0.28f;
+                return new Color(g, g * 0.98f, g * 0.94f);
+            }, 22);
+            // Window strips: sky-blue glass panes with soft clouds between heavy
+            // structural frames and thin mullions.
+            Texture2D glassTex = MakeColonyTexture("Colony_WindowSky", 256, (x, y, r) =>
+            {
+                bool frame = x < 6 || y < 6;
+                bool mull = x % 64 < 2 || y % 64 < 2;
+                if (frame) return new Color(0.3f, 0.32f, 0.35f);
+                if (mull) return new Color(0.45f, 0.48f, 0.52f);
+                float c = Mathf.Clamp01(Mathf.PerlinNoise(x * 0.018f, y * 0.03f) * 1.6f - 0.55f);
+                Color sky = Color.Lerp(new Color(0.48f, 0.66f, 0.9f), new Color(0.72f, 0.84f, 0.98f), y / 256f);
+                return Color.Lerp(sky, new Color(0.95f, 0.96f, 0.98f), c * 0.7f);
+            }, 23);
+            // Outer hull: panels of mixed sizes, seams, hatches, grime.
+            Texture2D hullTex = MakeColonyTexture("Colony_HullPanels", 256, (x, y, r) =>
+            {
+                int big = (x / 64) * 5 + (y / 32) * 3;
+                bool split = Hash01(x / 64, y / 32, 8) > 0.5f;
+                bool seam = x % 64 == 0 || y % 32 == 0 || (split && x % 32 == 0) || (!split && y % 16 == 0);
+                float n = 0.44f + (big % 7) * 0.013f + ((float)r.NextDouble() - 0.5f) * 0.03f;
+                float grime = Mathf.Clamp01(Mathf.PerlinNoise(x * 0.02f, y * 0.05f) - 0.35f) * 0.25f;
+                bool hatch = Hash01(x / 64, y / 32, 9) > 0.85f && x % 64 > 16 && x % 64 < 48 && y % 32 > 8 && y % 32 < 24;
+                Color c = new Color(n, n + 0.01f, n + 0.02f) * (1f - grime);
+                if (hatch) c *= (x % 64 == 17 || x % 64 == 47 || y % 32 == 9 || y % 32 == 23) ? 0.55f : 0.85f;
+                bool rivet = (x % 64 == 3 || x % 64 == 61) && y % 8 == 4;
+                if (rivet) c *= 0.7f;
+                return seam ? new Color(0.2f, 0.21f, 0.23f) : c;
+            }, 24);
+
+            // --- Materials ---
+            // City materials by index (see ChunkedAcc): 0 office, 1 glass, 2 residential,
+            // 3 concrete, 4 paving, 5 grass, 6 roof gear, 7 red warning lights,
+            // 8 lamps, 9 brick, 10 dark modern, 11 shop fronts, 12 palette (cars,
+            // roofs, poles, trees), 13 road paint.
+            int[] facMat = { 0, 1, 2, 9, 10 };
+            Material[] cityMats =
+            {
+                MakeEmissionMapMat(facBase[0], facEmis[0], 1.2f, 0.25f),
+                MakeEmissionMapMat(facBase[1], facEmis[1], 1.2f, 0.85f, 0.3f),
+                MakeEmissionMapMat(facBase[2], facEmis[2], 1.2f, 0.2f),
+                MakeMat(new Color(0.5f, 0.5f, 0.5f)),
+                MakeTexturedMat(Color.white, paverTex, 0f, 0.15f),
+                MakeTexturedMat(Color.white, grassTex, 0f, 0.05f),
+                MakeMat(new Color(0.34f, 0.35f, 0.37f)),
+                MakeEmissiveMat(new Color(0.8f, 0.1f, 0.08f), new Color(3f, 0.2f, 0.15f)),
+                MakeEmissiveMat(new Color(1f, 0.9f, 0.7f), new Color(2.4f, 2.1f, 1.6f)),
+                MakeEmissionMapMat(facBase[3], facEmis[3], 1.2f, 0.12f),
+                MakeEmissionMapMat(facBase[4], facEmis[4], 1.2f, 0.8f, 0.4f),
+                MakeEmissionMapMat(shopBase, shopEmis, 1.1f, 0.5f),
+                MakeTexturedMat(Color.white, palTex, 0f, 0.45f),
+                MakeMat(new Color(0.82f, 0.82f, 0.78f)),
+            };
+            if (cityMats[3].HasProperty("_Smoothness")) cityMats[3].SetFloat("_Smoothness", 0.1f);
+            Material groundMat = MakeTexturedMat(Color.white, groundTex, 0f, 0.2f);
+            Material upperLand = MakeTexturedMat(Color.white, cityLightsTex, 0.45f, 0.1f);
+            Material windowMat = MakeTexturedMat(Color.white, glassTex, 0.95f, 0.9f);
+            Material hullMat = MakeTexturedMat(Color.white, hullTex, 0f, 0.35f);
+            if (hullMat.HasProperty("_Metallic")) hullMat.SetFloat("_Metallic", 0.35f);
+            Material windowOutMat = MakeTexturedMat(new Color(0.3f, 0.38f, 0.48f), glassTex, 0.18f, 0.95f);
+            if (windowOutMat.HasProperty("_Metallic")) windowOutMat.SetFloat("_Metallic", 0.6f);
+            Material hullLights = MakeEmissiveMat(new Color(1f, 0.95f, 0.8f), new Color(2.6f, 2.4f, 1.9f));
+            // Mirrors: dark, almost perfectly reflective panels (they show the stars
+            // and the sun's glare, not a glow of their own).
+            Material mirrorMat = MakeEmissiveMat(new Color(0.16f, 0.19f, 0.24f), new Color(0.05f, 0.07f, 0.1f));
+            if (mirrorMat.HasProperty("_Smoothness")) mirrorMat.SetFloat("_Smoothness", 0.97f);
+            if (mirrorMat.HasProperty("_Metallic")) mirrorMat.SetFloat("_Metallic", 1f);
+            Material frameMat = MakeMat(new Color(0.36f, 0.37f, 0.39f));
+            if (frameMat.HasProperty("_Metallic")) frameMat.SetFloat("_Metallic", 0.5f);
+
+            // Scene fog stays ENABLED (unreachable start distance) so the fog shader
+            // variants are kept in the player build; ColonyAtmosphere moves the
+            // distances in and out when the camera enters / leaves the colony.
+            RenderSettings.fog = true;
+            RenderSettings.fogMode = FogMode.Linear;
+            RenderSettings.fogStartDistance = 90000f;
+            RenderSettings.fogEndDistance = 100000f;
+            RenderSettings.fogColor = new Color(0.64f, 0.72f, 0.84f);
+
+            // --- Groups: the exterior is switched off from inside (ColonyAtmosphere),
+            //     the breach wreckage and the caps are always shown. ---
+            Transform exterior = new GameObject("Exterior").transform;
+            exterior.SetParent(root.transform, false);
+            Transform breachRoot = new GameObject("BreachWreckage").transform;
+            breachRoot.SetParent(root.transform, false);
+
+            // --- Inner hull: 3 land + 3 window strips ---
+            MeshAcc bottomLand = new MeshAcc(), upper = new MeshAcc(), windows = new MeshAcc();
+            AddCylinderBand(bottomLand, axis0, R, 240f, 300f, 0f, L, 96, true, 40f, 12);
+            AddCylinderBand(upper, axis0, R, 0f, 60f, 0f, L, 32, true, 900f, 12);
+            AddCylinderBand(upper, axis0, R, 120f, 180f, 0f, L, 32, true, 900f, 12);
+            AddCylinderBand(windows, axis0, R, 300f, 360f, 0f, L, 32, true, 420f, 12);
+            AddCylinderBand(windows, axis0, R, 60f, 120f, 0f, L, 32, true, 420f, 12);
+            AddCylinderBand(windows, axis0, R, 180f, 240f, 0f, L, 32, true, 420f, 12);
+
+            // --- Outer hull, frame ribs, light rings ---
+            MeshAcc hullOut = new MeshAcc(), lightsOut = new MeshAcc(), windowsOut = new MeshAcc(), frames = new MeshAcc();
+            foreach (float a in new[] { 240f, 0f, 120f })
+            {
+                AddCylinderBand(hullOut, axis0, R + 2f, a, a + 60f, 0f, L, 24, false, 120f, 12);          // land strips: panelled hull
+                AddCylinderBand(windowsOut, axis0, R + 2f, a + 60f, a + 120f, 0f, L, 24, false, 420f, 12); // window strips: glass seen from outside
+            }
+            // Frame ribs between the strips: a top band plus two side walls each.
+            for (int k = 0; k < 6; k++)
+            {
+                float a = k * 60f;
+                AddCylinderBand(frames, axis0, R + 30f, a - 0.6f, a + 0.6f, 0f, L, 1, false, 300f, 12);
+                foreach (float s in new[] { -0.6f, 0.6f })
+                {
+                    float ar = (a + s) * Mathf.Deg2Rad;
+                    Vector3 d = new Vector3(Mathf.Cos(ar), Mathf.Sin(ar), 0f), t = new Vector3(-Mathf.Sin(ar), Mathf.Cos(ar), 0f) * Mathf.Sign(s);
+                    for (int zs = 0; zs < 12; zs++)
+                    {
+                        float za = L * zs / 12f, zb = L * (zs + 1) / 12f;
+                        Vector2 zz = Vector2.zero;
+                        frames.Quad(axis0 + d * (R + 2f) + Vector3.forward * za, axis0 + d * (R + 30f) + Vector3.forward * za,
+                            axis0 + d * (R + 30f) + Vector3.forward * zb, axis0 + d * (R + 2f) + Vector3.forward * zb, t, zz, zz, zz, zz);
+                    }
+                }
+            }
+            // Window lattice seen from outside: cross frames every 400 m and
+            // lengthwise mullions every 10 deg over the three window strips.
+            foreach (float a in new[] { 300f, 60f, 180f })
+            {
+                for (float z = 200f; z < L; z += 400f)
+                {
+                    AddCylinderBand(frames, axis0, R + 12f, a, a + 60f, z, z + 14f, 16, false, 300f);
+                    AddCylinderBand(frames, axis0, R + 12f, a, a + 60f, z, z + 14f, 16, true, 300f); // underside
+                }
+                for (float m = 10f; m < 60f; m += 10f)
+                    AddCylinderBand(frames, axis0, R + 8f, a + m - 0.15f, a + m + 0.15f, 0f, L, 1, false, 300f, 12);
+            }
+            for (float z = 500f; z < L; z += 1000f)
+                AddCylinderBand(lightsOut, axis0, R + 3f, 0f, 360f, z, z + 18f, 144, false, 300f);
+            // Hull greebles on the land strips: radiator panels, conduits, vents.
+            for (float z = 120f; z < L - 100f; z += 180f)
+            {
+                foreach (float a in new[] { 240f, 0f, 120f })
+                {
+                    for (int g = 0; g < 5; g++)
+                    {
+                        float ang = (a + 4f + (float)rnd.NextDouble() * 52f) * Mathf.Deg2Rad;
+                        Vector3 d = new Vector3(Mathf.Cos(ang), Mathf.Sin(ang), 0f), t = new Vector3(-Mathf.Sin(ang), Mathf.Cos(ang), 0f);
+                        float hw = 8f + (float)rnd.NextDouble() * 34f, hh = 2f + (float)rnd.NextDouble() * 10f, hd = 10f + (float)rnd.NextDouble() * 60f;
+                        Vector3 c = axis0 + d * (R + 2f + hh) + Vector3.forward * (z + (float)rnd.NextDouble() * 120f);
+                        AddOrientedBox(hullOut, c, t, d, Vector3.forward, new Vector3(hw, hh, hd), new Vector2(0.3f + 0.4f * g / 5f, 0.4f));
+                    }
+                }
+            }
+
+            // --- Mirrors: hinged at the far end along each window strip, opened 28 deg,
+            //     with frame beams on their edges and struts back to the hull ---
+            MeshAcc mirrors = new MeshAcc();
+            foreach (float wa in new[] { 330f, 90f, 210f })
+            {
+                float ar = wa * Mathf.Deg2Rad;
+                Vector3 nrm = new Vector3(Mathf.Cos(ar), Mathf.Sin(ar), 0f);
+                Vector3 tan = new Vector3(-Mathf.Sin(ar), Mathf.Cos(ar), 0f);
+                float half = R * Mathf.Sin(30f * Mathf.Deg2Rad) * 0.98f, len = L * 0.92f, open = 28f * Mathf.Deg2Rad;
+                Vector3 hinge = axis0 + nrm * (R + 40f) + Vector3.forward * L;
+                Vector3 dir = (-Vector3.forward * Mathf.Cos(open) + nrm * Mathf.Sin(open)).normalized;
+                Vector3 a0 = hinge - tan * half, a1 = hinge + tan * half, b1 = a1 + dir * len, b0 = a0 + dir * len;
+                Vector3 face = Vector3.Cross(tan, dir).normalized;
+                Vector2 zz = Vector2.zero, fuv = new Vector2(0.3f, 0.3f);
+                mirrors.Quad(a0, a1, b1, b0, face, zz, zz, zz, zz);
+                mirrors.Quad(a0, a1, b1, b0, -face, zz, zz, zz, zz);
+                // Edge beams.
+                AddOrientedBox(frames, (a0 + b0) * 0.5f, tan, face, dir, new Vector3(18f, 14f, len * 0.5f + 18f), fuv);
+                AddOrientedBox(frames, (a1 + b1) * 0.5f, tan, face, dir, new Vector3(18f, 14f, len * 0.5f + 18f), fuv);
+                AddOrientedBox(frames, (b0 + b1) * 0.5f, dir, face, tan, new Vector3(18f, 14f, half + 18f), fuv);
+                AddOrientedBox(frames, (a0 + a1) * 0.5f, dir, face, tan, new Vector3(22f, 22f, half + 18f), fuv); // hinge beam
+                // Cross ribs on the back side.
+                for (int k = 1; k < 6; k++)
+                {
+                    Vector3 c = (a0 + a1) * 0.5f + dir * (len * k / 6f) - face * 10f;
+                    AddOrientedBox(frames, c, dir, face, tan, new Vector3(8f, 6f, half), fuv);
+                }
+                // Struts from the hull to the mirror edges.
+                foreach (float f in new[] { 0.45f, 0.8f })
+                {
+                    foreach (float sd in new[] { -1f, 1f })
+                    {
+                        Vector3 mp = hinge + tan * (half * sd) + dir * (len * f);
+                        Vector3 hp = axis0 + nrm * (R + 30f) + tan * (half * 0.9f * sd) + Vector3.forward * (L + (mp.z - hinge.z) * 0.55f);
+                        Vector3 axis = mp - hp;
+                        Vector3 side = Vector3.Cross(axis, nrm).normalized;
+                        AddOrientedBox(frames, (mp + hp) * 0.5f, side, Vector3.Cross(side, axis).normalized, axis, new Vector3(9f, 9f, axis.magnitude * 0.5f), fuv);
+                    }
+                }
+                AddCylinderBand(frames, axis0, R + 36f, wa - 30.5f, wa - 29.5f, L - 60f, L, 1, false, 300f);
+                AddCylinderBand(frames, axis0, R + 36f, wa + 29.5f, wa + 30.5f, L - 60f, L, 1, false, 300f);
+            }
+
+            // --- End caps: near one with the breach, docking spindles on both ---
+            MeshAcc caps = new MeshAcc(), breachAcc = new MeshAcc();
+            System.Func<float, float, bool> breach = (x, y) =>
+            {
+                float jag = (Mathf.PerlinNoise(x * 0.012f, y * 0.012f) - 0.5f) * 140f;
+                return Mathf.Abs(x) < ColonyBreachHalfWidth + jag && y < ColonyBreachTop + jag * 0.8f;
+            };
+            AddCapGrid(caps, axis0, R + 2f, 0f, 36, 180, breach);
+            AddCapGrid(caps, axis0, R + 2f, L, 16, 96, null);
+            AddCylinderBand(hullOut, axis0, 280f, 0f, 360f, -900f, 0f, 48, false, 200f, 3);          // near spindle
+            AddAnnulus(hullOut, axis0, 0f, 280f, -900f, 48, -1f);
+            AddCylinderBand(hullOut, axis0, 360f, 0f, 360f, L, L + 700f, 48, false, 200f, 3);        // far spindle
+            AddAnnulus(hullOut, axis0, 0f, 360f, L + 700f, 48, 1f);
+            AddAnnulus(lightsOut, axis0, 200f, 230f, -901f, 48, -1f);
+            for (int k = 0; k < 3; k++)
+            {
+                AddCylinderBand(lightsOut, axis0, 282f, 0f, 360f, -800f + k * 280f, -780f + k * 280f, 48, false, 200f);
+                AddCylinderBand(lightsOut, axis0, 362f, 0f, 360f, L + 150f + k * 200f, L + 165f + k * 200f, 48, false, 200f);
+            }
+            AddAnnulus(lightsOut, axis0, 900f, 930f, -1f, 128, -1f);
+            AddAnnulus(lightsOut, axis0, 1800f, 1830f, -1f, 160, -1f);
+            AddAnnulus(lightsOut, axis0, 1200f, 1260f, L - 1f, 128, -1f);   // far cap inner glow rings
+            AddAnnulus(lightsOut, axis0, 2400f, 2440f, L - 1f, 160, -1f);
+            // Radial stiffening spokes on the outside of both caps (none across the breach).
+            for (int k = 0; k < 16; k++)
+            {
+                float angD = k * 22.5f + 11.25f;
+                if (angD > 235f && angD < 305f) continue;
+                float ang = angD * Mathf.Deg2Rad;
+                Vector3 d = new Vector3(Mathf.Cos(ang), Mathf.Sin(ang), 0f), t = new Vector3(-Mathf.Sin(ang), Mathf.Cos(ang), 0f);
+                float rMid = (300f + R) * 0.5f, hl = (R - 300f) * 0.5f;
+                AddOrientedBox(frames, axis0 + d * rMid - Vector3.forward * 14f, t, -Vector3.forward, d, new Vector3(22f, 14f, hl), new Vector2(0.3f, 0.3f));
+                AddOrientedBox(frames, axis0 + d * rMid + Vector3.forward * (L + 14f), t, Vector3.forward, d, new Vector3(22f, 14f, hl), new Vector2(0.3f, 0.3f));
+            }
+            // Torn plates around the breach (outside face).
+            for (int k = 0; k < 90; k++)
+            {
+                float ang = (float)rnd.NextDouble() * Mathf.PI;
+                float ex = Mathf.Cos(ang) * (ColonyBreachHalfWidth + 60f + (float)rnd.NextDouble() * 70f);
+                float ey = Mathf.Sin(ang) * (ColonyBreachTop + 60f + (float)rnd.NextDouble() * 70f);
+                float s = 8f + (float)rnd.NextDouble() * 36f;
+                Vector3 c = new Vector3(ex, Mathf.Max(0f, ey), zN - s * 0.3f);
+                // Bent outward, tilted at random - blown out from inside.
+                Vector3 outDir = new Vector3(ex, ey - 150f, 0f).normalized;
+                Vector3 up = (-Vector3.forward * 0.6f + outDir * 0.8f + new Vector3((float)rnd.NextDouble() - 0.5f, (float)rnd.NextDouble() - 0.5f, 0f) * 0.6f).normalized;
+                Vector3 side = Vector3.Cross(up, outDir).normalized;
+                if (side.sqrMagnitude < 0.01f) side = Vector3.right;
+                AddOrientedBox(breachAcc, c, side, Vector3.Cross(side, up).normalized, up, new Vector3(s, s * 0.08f + 1.5f, s * 0.7f), new Vector2(0.2f + (float)rnd.NextDouble() * 0.6f, 0.5f));
+            }
+            // Exposed structural girders sticking into the opening.
+            for (int k = 0; k < 26; k++)
+            {
+                float ang = (0.05f + 0.9f * (float)rnd.NextDouble()) * Mathf.PI;
+                Vector3 edge = new Vector3(Mathf.Cos(ang) * (ColonyBreachHalfWidth + 20f), Mathf.Max(10f, Mathf.Sin(ang) * (ColonyBreachTop + 20f)), zN + 2f);
+                Vector3 inward = (new Vector3(0f, 160f, zN) - edge);
+                inward.z = 0f;
+                inward = inward.normalized;
+                float l = 30f + (float)rnd.NextDouble() * 70f;
+                Vector3 axis = (inward + new Vector3(0f, 0f, ((float)rnd.NextDouble() - 0.5f) * 1.2f) + Random01Vec(rnd) * 0.5f).normalized;
+                Vector3 side = Vector3.Cross(axis, Vector3.forward).normalized;
+                if (side.sqrMagnitude < 0.01f) side = Vector3.right;
+                AddOrientedBox(breachAcc, edge + axis * (l * 0.5f), side, Vector3.Cross(axis, side).normalized, axis, new Vector3(2.2f, 2.2f, l * 0.5f), new Vector2(0.25f, 0.25f));
+            }
+
+            // --- The city ---
+            ChunkedAcc city = new ChunkedAcc();
+            var bMin = new System.Collections.Generic.List<Vector3>();
+            var bMax = new System.Collections.Generic.List<Vector3>();
+            System.Action<Vector3, Vector3> collide = (mn, mx) => { bMin.Add(mn); bMax.Add(mx); };
+
+            float zCity0 = zN + 350f, zDown1 = zN + ColonyDowntownDepth;
+            float boulevard = 55f, blockW = 110f, street = 30f, pitch = blockW + street;
+            Vector2 core = new Vector2(0f, zN + 2300f);
+
+            // Curved curb-high plate over a block (follows the land).
+            System.Action<int, float, float, float, float, float> plate = (mat, x0, x1, z0, z1, lift) =>
+            {
+                MeshAcc a = city.Get(mat, (z0 + z1) * 0.5f);
+                AddCylinderBand(a, axis0, R - lift, LandAngle(x0), LandAngle(x1), z0 - zN, z1 - zN,
+                    Mathf.Max(1, Mathf.CeilToInt((x1 - x0) / 40f)), true, 6f);
+            };
+
+            // One building on a lot (x0..x1, z0..z1), 'hScale' 0..1 how tall this spot is.
+            System.Action<float, float, float, float, float, bool> building = (x0, x1, z0, z1, hScale, suburb) =>
+            {
+                float w = x1 - x0, d = z1 - z0;
+                // Base: sunk into the land at the lower side, top measured from the higher side.
+                float gLow = Mathf.Min(ColonyGroundY(x0), ColonyGroundY(x1)) - 3f;
+                float gHigh = Mathf.Max(ColonyGroundY(x0), ColonyGroundY(x1));
+                int sty = suburb ? (rnd.Next(2) == 0 ? 2 : 3) : rnd.Next(5);
+                int fac = facMat[sty];
+                Vector3 baseMin = Vector3.zero, baseMax = Vector3.zero;
+                Vector2 uvo = new Vector2(rnd.Next(8) / 8f, rnd.Next(8) / 8f);
+                float zc = (z0 + z1) * 0.5f;
+                float h = suburb ? 8f + (float)rnd.NextDouble() * 20f
+                                 : 22f + (float)rnd.NextDouble() * 50f + hScale * (60f + (float)rnd.NextDouble() * 360f);
+                int type = suburb ? 0 : rnd.Next(4);
+                Vector3 topMin, topMax;
+                if (type == 1 && h > 80f)
+                {
+                    // Setback tower: 3 tiers, each smaller.
+                    float yb = gLow, cx = (x0 + x1) * 0.5f, cz = zc, fw = w, fd = d;
+                    float[] share = { 0.45f, 0.33f, 0.22f };
+                    topMin = topMax = Vector3.zero;
+                    for (int tr = 0; tr < 3; tr++)
+                    {
+                        float top = (tr == 0 ? gHigh : yb) + h * share[tr];
+                        Vector3 mn = new Vector3(cx - fw * 0.5f, yb, cz - fd * 0.5f), mx = new Vector3(cx + fw * 0.5f, top, cz + fd * 0.5f);
+                        AddBuildingBox(city.Get(fac, zc), mn, mx, uvo);
+                        collide(mn, mx);
+                        if (tr == 0) { baseMin = mn; baseMax = mx; }
+                        else AddSolidBox(city.Get(3, zc), new Vector3(topMin.x - 0.6f, yb - 1.2f, topMin.z - 0.6f), new Vector3(topMax.x + 0.6f, yb + 0.3f, topMax.z + 0.6f)); // setback ledge
+                        topMin = mn; topMax = mx;
+                        yb = top; fw *= 0.72f; fd *= 0.72f;
+                    }
+                }
+                else if (type == 2 && h > 60f)
+                {
+                    // Podium + tower.
+                    float podTop = gHigh + 12f + (float)rnd.NextDouble() * 14f;
+                    Vector3 pmn = new Vector3(x0, gLow, z0), pmx = new Vector3(x1, podTop, z1);
+                    AddBuildingBox(city.Get(fac, zc), pmn, pmx, uvo);
+                    collide(pmn, pmx);
+                    baseMin = pmn; baseMax = pmx;
+                    AddSolidBox(city.Get(3, zc), new Vector3(pmn.x - 0.6f, podTop - 1.2f, pmn.z - 0.6f), new Vector3(pmx.x + 0.6f, podTop + 0.3f, pmx.z + 0.6f));
+                    float tw = w * (0.45f + (float)rnd.NextDouble() * 0.15f), td = d * (0.45f + (float)rnd.NextDouble() * 0.15f);
+                    float tx = x0 + (w - tw) * (float)rnd.NextDouble(), tz = z0 + (d - td) * (float)rnd.NextDouble();
+                    Vector3 tmn = new Vector3(tx, podTop, tz), tmx = new Vector3(tx + tw, gHigh + h, tz + td);
+                    AddBuildingBox(city.Get(facMat[(sty + 1 + rnd.Next(4)) % 5], zc), tmn, tmx, uvo);
+                    collide(tmn, tmx);
+                    topMin = tmn; topMax = tmx;
+                }
+                else if (type == 3 && w > 40f)
+                {
+                    // Twin slabs.
+                    float gap = w * 0.18f, sw = (w - gap) * 0.5f;
+                    Vector3 amn = new Vector3(x0, gLow, z0), amx = new Vector3(x0 + sw, gHigh + h, z1);
+                    Vector3 bmn = new Vector3(x1 - sw, gLow, z0), bmx = new Vector3(x1, gHigh + h * (0.65f + (float)rnd.NextDouble() * 0.3f), z1);
+                    AddBuildingBox(city.Get(fac, zc), amn, amx, uvo);
+                    AddBuildingBox(city.Get(fac, zc), bmn, bmx, uvo);
+                    collide(amn, amx); collide(bmn, bmx);
+                    baseMin = amn; baseMax = amx;
+                    AddSolidBox(city.Get(3, zc), new Vector3(bmn.x - 0.6f, bmx.y - 1.2f, bmn.z - 0.6f), new Vector3(bmx.x + 0.6f, bmx.y + 0.3f, bmx.z + 0.6f));
+                    topMin = amn; topMax = amx;
+                }
+                else
+                {
+                    Vector3 mn = new Vector3(x0, gLow, z0), mx = new Vector3(x1, gHigh + h, z1);
+                    AddBuildingBox(city.Get(fac, zc), mn, mx, uvo);
+                    collide(mn, mx);
+                    baseMin = mn; baseMax = mx;
+                    topMin = mn; topMax = mx;
+                }
+
+                // Street level: shop fronts with a canopy ledge (downtown), or a
+                // pitched roof (suburban houses); a cornice along every roof edge.
+                if (!suburb)
+                {
+                    float bandTop = gHigh + 6.5f;
+                    if (baseMax.y > bandTop + 4f)
+                    {
+                        AddBandBox(city.Get(11, zc), new Vector3(baseMin.x - 0.3f, gLow, baseMin.z - 0.3f), new Vector3(baseMax.x + 0.3f, bandTop, baseMax.z + 0.3f), BuildingTile, uvo.x);
+                        AddSolidBox(city.Get(3, zc), new Vector3(baseMin.x - 1.8f, bandTop, baseMin.z - 1.8f), new Vector3(baseMax.x + 1.8f, bandTop + 0.5f, baseMax.z + 1.8f));
+                    }
+                    AddSolidBox(city.Get(3, zc), new Vector3(topMin.x - 0.7f, topMax.y - 1.4f, topMin.z - 0.7f), new Vector3(topMax.x + 0.7f, topMax.y + 0.5f, topMax.z + 0.7f));
+                }
+                else
+                {
+                    AddGableRoof(city.Get(12, zc), topMin, topMax, 3f + (float)rnd.NextDouble() * 3f, Pal(8 + rnd.Next(3)));
+                }
+
+                // Rooftop gear, antennas, warning lights.
+                float roofY = topMax.y;
+                float rw = topMax.x - topMin.x, rd = topMax.z - topMin.z;
+                int gear = suburb ? 0 : 1 + rnd.Next(3);
+                for (int g = 0; g < gear; g++)
+                {
+                    float gw = Mathf.Min(rw * 0.4f, 4f + (float)rnd.NextDouble() * 9f), gd = Mathf.Min(rd * 0.4f, 4f + (float)rnd.NextDouble() * 9f);
+                    float gx = topMin.x + (rw - gw) * (float)rnd.NextDouble(), gz = topMin.z + (rd - gd) * (float)rnd.NextDouble();
+                    AddSolidBox(city.Get(6, zc), new Vector3(gx, roofY, gz), new Vector3(gx + gw, roofY + 2f + (float)rnd.NextDouble() * 5f, gz + gd));
+                }
+                if (!suburb && roofY - gHigh > 120f && rnd.NextDouble() < 0.45)
+                {
+                    float ax = (topMin.x + topMax.x) * 0.5f, az = (topMin.z + topMax.z) * 0.5f, ah = 12f + (float)rnd.NextDouble() * 35f;
+                    AddSolidBox(city.Get(6, zc), new Vector3(ax - 0.8f, roofY, az - 0.8f), new Vector3(ax + 0.8f, roofY + ah, az + 0.8f));
+                    AddSolidBox(city.Get(7, zc), new Vector3(ax - 1.4f, roofY + ah, az - 1.4f), new Vector3(ax + 1.4f, roofY + ah + 2.8f, az + 1.4f));
+                }
+            };
+
+            // VARCO landmark buildings (per "콜로니 외관이랑 도시에 건물은 varko에서
+            // 만들어도되"): models in Assets/Models/ColonyBuildings replace some
+            // downtown blocks - towers near the core, apartment clusters and the
+            // domed civic hall elsewhere. Each model is used a few times at most
+            // (the head camera renders the scene six times a frame).
+            int buildings = 0;
+            GameObject[] landmarkModels = LoadColonyBuildingModels();
+            Transform landmarkRoot = null;
+            if (landmarkModels.Length > 0)
+            {
+                landmarkRoot = new GameObject("VARCO_Buildings").transform;
+                landmarkRoot.SetParent(root.transform, false);
+            }
+            int[] landmarkUses = new int[landmarkModels.Length];
+            System.Random lrnd = new System.Random(4711);
+            int landmarkCount = 0;
+            // Places one model with its footprint inside the lot, standing on the land;
+            // returns false if it doesn't suit the spot (or it's used up).
+            System.Func<float, float, float, float, float, bool> landmark = (x0, x1, z0, z1, hScale) =>
+            {
+                int best = -1;
+                for (int i = 0; i < landmarkModels.Length; i++)
+                {
+                    bool tower = landmarkModels[i].name.Contains("Tower");
+                    if (tower != (hScale > 0.35f)) continue;
+                    if (landmarkUses[i] >= ColonyLandmarkUsesPerModel) continue;
+                    if (best < 0 || landmarkUses[i] < landmarkUses[best]) best = i;
+                }
+                if (best < 0) return false;
+                GameObject model = landmarkModels[best];
+                landmarkUses[best]++;
+                bool isTower = model.name.Contains("Tower");
+                bool isApartment = model.name.Contains("Apartment");
+                int copies = isApartment ? 2 : 1;
+                for (int c = 0; c < copies; c++)
+                {
+                    float lx0 = x0, lx1 = x1, lz0 = z0, lz1 = z1;
+                    if (isApartment)
+                    {
+                        float xm = (x0 + x1) * 0.5f, zm = (z0 + z1) * 0.5f;
+                        if ((c & 1) == 0) lx1 = xm - 4f; else lx0 = xm + 4f;
+                    }
+                    float targetH = isTower
+                        ? (model.name.Contains("Central") ? 360f : model.name.Contains("Twin") ? 300f : 260f) * (0.8f + hScale * 0.3f)
+                        : isApartment ? 45f + (float)lrnd.NextDouble() * 20f : 1000f;
+                    // Holder carries the (world-axis) scale; the model keeps its import
+                    // rotation (FBX root is rotated 270 deg about X) under it, so a
+                    // vertical stretch really goes up and not into the depth.
+                    GameObject holder = new GameObject(model.name + "_" + landmarkCount + "_" + c);
+                    holder.transform.SetParent(landmarkRoot, false);
+                    GameObject inst = (GameObject)PrefabUtility.InstantiatePrefab(model);
+                    inst.transform.SetParent(holder.transform, false);
+                    inst.transform.localPosition = Vector3.zero;
+                    inst.transform.localRotation = Quaternion.Euler(0f, 90f * lrnd.Next(4), 0f) * inst.transform.localRotation;
+                    foreach (Collider col in inst.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(col);
+                    Renderer[] rends = inst.GetComponentsInChildren<Renderer>(true);
+                    if (rends.Length == 0) { UnityEngine.Object.DestroyImmediate(holder); continue; }
+                    Bounds b = rends[0].bounds;
+                    for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+                    float fp = Mathf.Max(b.size.x, b.size.z), lot = Mathf.Min(lx1 - lx0, lz1 - lz0);
+                    if (fp < 0.0001f || b.size.y < 0.0001f) { UnityEngine.Object.DestroyImmediate(holder); continue; }
+                    float sFoot = lot / fp, sHeight = targetH / b.size.y;
+                    float sXZ = Mathf.Min(sFoot, sHeight);
+                    // Towers limited by the lot may stretch up to 1.5x vertically to keep their height.
+                    float sY = isTower ? Mathf.Min(sHeight, sXZ * 1.5f) : sXZ;
+                    sY = Mathf.Max(sY, sXZ);
+                    Vector3 scl = new Vector3(sXZ, sY, sXZ);
+                    holder.transform.localScale = scl;
+                    b = rends[0].bounds;
+                    for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+                    float cx = (lx0 + lx1) * 0.5f, cz = (lz0 + lz1) * 0.5f;
+                    float gLow = Mathf.Min(ColonyGroundY(lx0), ColonyGroundY(lx1)) - 2f;
+                    holder.transform.position += new Vector3(cx - b.center.x, gLow - b.min.y, cz - b.center.z);
+                    b = rends[0].bounds;
+                    for (int r = 1; r < rends.Length; r++) b.Encapsulate(rends[r].bounds);
+                    foreach (Renderer r in rends)
+                    {
+                        r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                        r.receiveShadows = false;
+                    }
+                    collide(b.min, b.max);
+                    buildings++;
+                }
+                landmarkCount++;
+                return true;
+            };
+
+            // Downtown blocks.
+            for (float z0 = zCity0; z0 + blockW <= zDown1; z0 += pitch)
+            {
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    for (int k = 0; k < 7; k++)
+                    {
+                        float bx0 = boulevard + k * pitch, bx1 = bx0 + blockW;
+                        float x0 = side > 0 ? bx0 : -bx1, x1 = side > 0 ? bx1 : -bx0;
+                        float zc = z0 + blockW * 0.5f;
+                        float dist = new Vector2(((x0 + x1) * 0.5f - core.x) / 1.3f, zc - core.y).magnitude;
+                        float hScale = Mathf.Exp(-(dist / 1100f) * (dist / 1100f));
+                        double roll = rnd.NextDouble();
+                        if (roll < 0.07)
+                        {
+                            // Park: grass plate + trees.
+                            plate(5, x0, x1, z0, z0 + blockW, 0.9f);
+                            for (int tr = 0; tr < 14; tr++)
+                            {
+                                float tx = x0 + 8f + (float)rnd.NextDouble() * (blockW - 16f), tz = z0 + 8f + (float)rnd.NextDouble() * (blockW - 16f);
+                                AddTree(city.Get(5, zc), new Vector3(tx, ColonyGroundY(tx) - 0.5f, tz), 9f + (float)rnd.NextDouble() * 7f, 3f + (float)rnd.NextDouble() * 1.5f);
+                            }
+                            continue;
+                        }
+                        plate(4, x0, x1, z0, z0 + blockW, 0.9f);
+                        if (roll < 0.1) continue; // open plaza
+                        if (roll < 0.22 && landmarkModels.Length > 0 && landmark(x0 + 4f, x1 - 4f, z0 + 4f, z0 + blockW - 4f, hScale)) continue;
+                        // Lots: 1, 2 or 4.
+                        int split = rnd.Next(3);
+                        float m = 6f;
+                        if (split == 0) { building(x0 + m, x1 - m, z0 + m, z0 + blockW - m, hScale, false); buildings++; }
+                        else if (split == 1)
+                        {
+                            float xm = (x0 + x1) * 0.5f;
+                            building(x0 + m, xm - 4f, z0 + m, z0 + blockW - m, hScale, false);
+                            building(xm + 4f, x1 - m, z0 + m, z0 + blockW - m, hScale * 0.8f, false);
+                            buildings += 2;
+                        }
+                        else
+                        {
+                            float xm = (x0 + x1) * 0.5f, zm = z0 + blockW * 0.5f;
+                            building(x0 + m, xm - 4f, z0 + m, zm - 4f, hScale, false);
+                            building(xm + 4f, x1 - m, z0 + m, zm - 4f, hScale * 0.7f, false);
+                            building(x0 + m, xm - 4f, zm + 4f, z0 + blockW - m, hScale * 0.85f, false);
+                            building(xm + 4f, x1 - m, zm + 4f, z0 + blockW - m, hScale * 0.6f, false);
+                            buildings += 4;
+                        }
+                    }
+                }
+            }
+
+            // Suburbs and farmland: the sides of downtown and everything further in.
+            for (float z0 = zCity0; z0 + 120f <= zF - 400f; z0 += 170f)
+            {
+                for (float xs = -ColonyLandHalf + 20f; xs + 120f <= ColonyLandHalf - 20f; xs += 170f)
+                {
+                    bool downtownArea = z0 < zDown1 && xs + 120f > -ColonyDowntownHalf && xs < ColonyDowntownHalf;
+                    if (downtownArea) continue;
+                    double roll = rnd.NextDouble();
+                    float zc = z0 + 60f;
+                    if (roll < 0.35) { plate(5, xs, xs + 120f, z0, z0 + 120f, 0.6f); continue; }   // fields
+                    if (roll < 0.5) continue;
+                    plate(4, xs, xs + 120f, z0, z0 + 120f, 0.6f);
+                    int houses = 1 + rnd.Next(3);
+                    for (int hsI = 0; hsI < houses; hsI++)
+                    {
+                        float hx = xs + 10f + (float)rnd.NextDouble() * 60f, hz = z0 + 10f + (float)rnd.NextDouble() * 60f;
+                        building(hx, hx + 25f + (float)rnd.NextDouble() * 25f, hz, hz + 25f + (float)rnd.NextDouble() * 25f, 0f, true);
+                        buildings++;
+                    }
+                }
+            }
+
+            // Elevated highway along the east half of the boulevard (x 17..43, so the
+            // centre line stays open to walk/fly down) + two cross highways over
+            // east-west streets.
+            float deckY = 30f, hwX = 30f;
+            for (float z = zCity0 - 100f; z < zDown1 + 200f; z += 300f)
+            {
+                Vector3 mn = new Vector3(hwX - 13f, deckY, z), mx = new Vector3(hwX + 13f, deckY + 3f, z + 300f);
+                AddSolidBox(city.Get(3, z + 150f), mn, mx);
+                collide(mn, mx);
+                AddSolidBox(city.Get(8, z + 150f), new Vector3(hwX - 0.6f, deckY + 3f, z), new Vector3(hwX + 0.6f, deckY + 3.2f, z + 300f));
+                for (float pz = z + 40f; pz < z + 300f; pz += 100f)
+                {
+                    Vector3 pmn = new Vector3(hwX - 4f, -2f, pz - 4f), pmx = new Vector3(hwX + 4f, deckY, pz + 4f);
+                    AddSolidBox(city.Get(3, pz), pmn, pmx);
+                    collide(pmn, pmx);
+                }
+            }
+            foreach (float zc in new[] { zN + 1455f, zN + 3135f })   // centres of E-W streets
+            {
+                // Follows the land's curve in 60 m steps.
+                for (float x = -ColonyDowntownHalf; x < ColonyDowntownHalf; x += 60f)
+                {
+                    float gy = ColonyGroundY(x + 30f);
+                    Vector3 mn = new Vector3(x, gy + deckY + 8f, zc - 14f), mx = new Vector3(x + 62f, gy + deckY + 11f, zc + 14f);
+                    AddSolidBox(city.Get(3, zc), mn, mx);
+                    collide(mn, mx);
+                    if (Mathf.Abs(x + 30f) > 40f && ((int)((x + 3000f) / 60f)) % 2 == 0)
+                    {
+                        Vector3 pmn = new Vector3(x + 26f, gy - 2f, zc - 4f), pmx = new Vector3(x + 34f, gy + deckY + 8f, zc + 4f);
+                        AddSolidBox(city.Get(3, zc), pmn, pmx);
+                        collide(pmn, pmx);
+                    }
+                }
+            }
+            // --- Street-level detail (per "디테일을 더 살려줘"): road paint and
+            //     crossings, street lights, trees along the boulevard, and traffic
+            //     left standing where it stopped when the fighting started (some of
+            //     it burnt out). On its own layer so the head camera only draws it
+            //     nearby (ColonyAtmosphere sets the cull distance). ---
+            ChunkedAcc detail = new ChunkedAcc();
+            System.Random drnd = new System.Random(2024);
+            System.Action<float, float, bool> car = (px, pz, alongZ) =>
+            {
+                float gy = ColonyGroundY(px);
+                bool bus = drnd.NextDouble() < 0.08;
+                bool burnt = drnd.NextDouble() < 0.15;
+                int col = burnt ? 11 : bus ? (drnd.NextDouble() < 0.5 ? 12 : 0) : new[] { 0, 0, 1, 1, 2, 3, 4, 5, 6, 7 }[drnd.Next(10)];
+                float len = bus ? 11.5f : 4.4f + (float)drnd.NextDouble() * 0.6f, wid = bus ? 2.5f : 1.8f, hgt = bus ? 3.1f : 1.0f;
+                Vector3 c = new Vector3(px, gy + hgt * 0.5f + 0.35f, pz);
+                Vector3 fwd = alongZ ? Vector3.forward : Vector3.right;
+                // A little askew, like abandoned traffic.
+                fwd = Quaternion.Euler(0f, ((float)drnd.NextDouble() - 0.5f) * (burnt ? 50f : 14f), 0f) * fwd;
+                Vector3 right = Vector3.Cross(Vector3.up, fwd);
+                AddOrientedBox(detail.Get(12, pz), c, right, Vector3.up, fwd, new Vector3(wid * 0.5f, hgt * 0.5f, len * 0.5f), Pal(col));
+                if (!bus)
+                    AddOrientedBox(detail.Get(12, pz), c + Vector3.up * (hgt * 0.5f + 0.35f) - fwd * 0.3f, right, Vector3.up, fwd,
+                        new Vector3(wid * 0.44f, 0.35f, len * 0.26f), Pal(burnt ? 11 : 2));
+            };
+            System.Action<float, float, float> lamp = (px, pz, armDir) =>
+            {
+                float gy = ColonyGroundY(px);
+                AddColorBox(detail.Get(12, pz), new Vector3(px - 0.2f, gy, pz - 0.2f), new Vector3(px + 0.2f, gy + 10f, pz + 0.2f), Pal(1));
+                float ax0 = Mathf.Min(px, px + armDir * 3.2f), ax1 = Mathf.Max(px, px + armDir * 3.2f);
+                AddColorBox(detail.Get(12, pz), new Vector3(ax0, gy + 9.8f, pz - 0.15f), new Vector3(ax1, gy + 10.1f, pz + 0.15f), Pal(1));
+                float lx = px + armDir * 3.2f;
+                AddSolidBox(detail.Get(8, pz), new Vector3(lx - 0.7f, gy + 9.55f, pz - 0.35f), new Vector3(lx + 0.7f, gy + 9.85f, pz + 0.35f));
+            };
+
+            float[] nsStreets = new float[12];
+            for (int k = 0; k < 6; k++) { nsStreets[2 * k] = boulevard + blockW + 15f + k * pitch; nsStreets[2 * k + 1] = -nsStreets[2 * k]; }
+            // Boulevard (x -55..55; highway piers at x 26..34).
+            float[] westLanes = { -47f, -39f, -31f, -23f, -15f, -7f }, eastLanes = { 7f, 13f, 19f, 43f, 50f };
+            for (float z = zCity0; z < zDown1; z += 18f)
+            {
+                foreach (float lx in new[] { -43f, -27f, -11f, 16f, 46.5f })
+                    AddGroundPaint(detail.Get(13, z), axis0, lx - 0.15f, lx + 0.15f, z, z + 4f);
+            }
+            for (float z = zCity0; z < zDown1; z += 45f)
+            {
+                AddGroundPaint(detail.Get(13, z), axis0, -0.9f, -0.6f, z, z + 45f);   // double centre line
+                AddGroundPaint(detail.Get(13, z), axis0, 0.6f, 0.9f, z, z + 45f);
+                lamp(-52.5f, z, 1f);
+                lamp(52.5f, z + 22f, -1f);
+            }
+            for (float z = zCity0 + 6f; z < zDown1; z += 22f)
+            {
+                foreach (float tx in new[] { -58.5f, 58.5f })
+                {
+                    float gy = ColonyGroundY(tx) + 0.9f;
+                    AddColorBox(detail.Get(12, z), new Vector3(tx - 0.25f, gy, z - 0.25f), new Vector3(tx + 0.25f, gy + 3f, z + 0.25f), Pal(13));
+                    AddTreeUV(detail.Get(12, z), new Vector3(tx, gy + 1.5f, z), 7f + (float)drnd.NextDouble() * 3f, 2.8f + (float)drnd.NextDouble(), Pal(drnd.NextDouble() < 0.5 ? 14 : 15));
+                }
+            }
+            foreach (float lx in westLanes) for (float z = zCity0 + (float)drnd.NextDouble() * 30f; z < zDown1; z += 18f + (float)drnd.NextDouble() * 70f) if (drnd.NextDouble() < 0.5) car(lx, z, true);
+            foreach (float lx in eastLanes) for (float z = zCity0 + (float)drnd.NextDouble() * 30f; z < zDown1; z += 18f + (float)drnd.NextDouble() * 70f) if (drnd.NextDouble() < 0.5) car(lx, z, true);
+            // North-south streets.
+            foreach (float sx in nsStreets)
+            {
+                for (float z = zCity0; z < zDown1; z += 18f)
+                    AddGroundPaint(detail.Get(13, z), axis0, sx - 0.15f, sx + 0.15f, z, z + 4f);
+                bool west = true;
+                for (float z = zCity0 + 10f; z < zDown1; z += 90f)
+                {
+                    lamp(sx + (west ? -13.5f : 13.5f), z, west ? 1f : -1f);
+                    west = !west;
+                }
+                for (float z = zCity0 + (float)drnd.NextDouble() * 40f; z < zDown1; z += 25f + (float)drnd.NextDouble() * 90f)
+                    if (drnd.NextDouble() < 0.45) car(sx + (drnd.NextDouble() < 0.5 ? -4f : 4f), z, true);
+            }
+            // East-west streets between block rows + zebra crossings on the boulevard.
+            for (float z0 = zCity0; z0 + blockW <= zDown1; z0 += pitch)
+            {
+                float sz = z0 + blockW + 15f; // street centre
+                for (float x = -52f; x < 52f; x += 2.6f)
+                {
+                    AddGroundPaint(detail.Get(13, sz), axis0, x, x + 1.3f, sz - 20f, sz - 16f);
+                    AddGroundPaint(detail.Get(13, sz), axis0, x, x + 1.3f, sz + 16f, sz + 20f);
+                }
+                for (float x = -ColonyDowntownHalf + (float)drnd.NextDouble() * 40f; x < ColonyDowntownHalf; x += 30f + (float)drnd.NextDouble() * 110f)
+                {
+                    if (Mathf.Abs(x) < 60f) continue;
+                    if (drnd.NextDouble() < 0.4) car(x, sz + (drnd.NextDouble() < 0.5 ? -4f : 4f), false);
+                }
+            }
+
+            // --- Build the meshes ---
+            // War damage just inside the breach: concrete and hull fragments strewn
+            // over the entrance plaza (the biggest ones block like buildings).
+            for (int k = 0; k < 160; k++)
+            {
+                float fx = ((float)drnd.NextDouble() - 0.5f) * 2f * (ColonyBreachHalfWidth + 150f);
+                float fz = zN + 20f + (float)drnd.NextDouble() * 360f * (0.4f + 0.6f * (float)drnd.NextDouble());
+                float sz0 = 1.5f + (float)(drnd.NextDouble() * drnd.NextDouble()) * 16f;
+                Vector3 up = (Vector3.up + Random01Vec(drnd) * 0.8f).normalized;
+                Vector3 side = Vector3.Cross(up, Vector3.forward).normalized;
+                Vector3 c = new Vector3(fx, ColonyGroundY(fx) + sz0 * 0.25f, fz);
+                Vector3 half = new Vector3(sz0, sz0 * (0.2f + 0.4f * (float)drnd.NextDouble()), sz0 * (0.5f + 0.7f * (float)drnd.NextDouble()));
+                if (drnd.NextDouble() < 0.7) AddOrientedBox(city.Get(12, fz), c, side, up, Vector3.Cross(side, up), half, Pal(drnd.NextDouble() < 0.35 ? 11 : drnd.NextDouble() < 0.5 ? 9 : 1)); // scorched concrete
+                else AddOrientedBox(breachAcc, c, side, up, Vector3.Cross(side, up), half, new Vector2(0.3f + 0.4f * (float)drnd.NextDouble(), 0.5f));
+                if (sz0 > 9f) collide(c - half * 0.7f, c + half * 0.7f);
+            }
+
+            // --- VARCO props (per "파공 주변 잔해나 항구 크레인 같은 외관 소품") ---
+            int props = PlaceColonyVarcoProps(root.transform, exterior, breachRoot, axis0, collide);
+
+            // --- Build the meshes ---
+            bottomLand.Build("Colony_LandStrip", root.transform, groundMat);
+            upper.Build("Colony_UpperLand", root.transform, upperLand);
+            windows.Build("Colony_Windows", root.transform, windowMat);
+            hullOut.Build("Colony_Hull", exterior, hullMat);
+            frames.Build("Colony_Frames", exterior, frameMat);
+            lightsOut.Build("Colony_Lights", exterior, hullLights);
+            mirrors.Build("Colony_Mirrors", exterior, mirrorMat);
+            windowsOut.Build("Colony_WindowsOutside", exterior, windowOutMat);
+            caps.Build("Colony_Caps", root.transform, hullMat);
+            breachAcc.Build("Colony_BreachPlates", breachRoot, hullMat);
+            city.BuildAll("Colony_City", root.transform, cityMats);
+            Transform detailRoot = new GameObject("StreetDetail").transform;
+            detailRoot.SetParent(root.transform, false);
+            detail.BuildAll("Colony_Street", detailRoot, cityMats);
+            foreach (Transform t in detailRoot.GetComponentsInChildren<Transform>(true)) t.gameObject.layer = ColonyDetailLayer;
+
+            ColonyStructure cs = root.AddComponent<ColonyStructure>();
+            cs.nearCapCenter = axis0;
+            cs.radius = R;
+            cs.length = L;
+            cs.breachHalfWidth = ColonyBreachHalfWidth;
+            cs.breachTop = ColonyBreachTop;
+            cs.landHalfWidth = ColonyLandHalf;
+            cs.boxMin = bMin.ToArray();
+            cs.boxMax = bMax.ToArray();
+            ColonyAtmosphere atmosphere = root.AddComponent<ColonyAtmosphere>();
+            atmosphere.colony = cs;
+            atmosphere.exteriorRoot = exterior;
+            atmosphere.streetDetailRoot = detailRoot;
+            atmosphere.detailLayer = ColonyDetailLayer;
+            if (!s_colonyPreview) AssetDatabase.SaveAssets();
+            Debug.Log("[Gundam] Space colony: " + (2f * R / 1000f) + " km x " + (L / 1000f) + " km, breach at z " + zN +
+                ", " + buildings + " buildings incl. " + landmarkCount + " VARCO landmark lots, " + props + " VARCO props (" + bMin.Count + " collision boxes).");
+            return cs;
+        }
+
+        /// <summary>Zaku spawn points in the downtown streets near the breach.</summary>
+        static Vector3[] ColonyZakuSpawns()
+        {
+            float[] xs = { 0f, -180f, 320f };
+            float[] zs = { ColonyNearZ + 600f, ColonyNearZ + 1000f, ColonyNearZ + 1500f };
+            Vector3[] p = new Vector3[3];
+            for (int i = 0; i < 3; i++) p[i] = new Vector3(xs[i], ColonyGroundY(xs[i]), zs[i]);
+            return p;
         }
 
         // Per "자쿠 ... 3마리정도 나오게 해줘 다른 곳에": three Zakus, each starting in
@@ -1711,13 +3330,18 @@ namespace Gundam.EditorTools
             new Vector3(95f, 0f, -10f),        // right, ~100 m
         };
 
-        static void PlaceZakuEnemy(Transform playerGundam)
+        static void PlaceZakuEnemy(Transform playerGundam) => PlaceZakuEnemy(playerGundam, null);
+
+        /// <summary>With a colony: the three Zakus guard its city instead (per
+        /// "거기를 전장으로 사용하게" - "내가 가서 싸우면되니까").</summary>
+        static void PlaceZakuEnemy(Transform playerGundam, ColonyStructure colony)
         {
-            for (int i = 0; i < ZakuSpawnPoints.Length; i++)
-                PlaceZakuEnemy(playerGundam, i == 0 ? "ZakuEnemy" : "ZakuEnemy_" + (i + 1), ZakuSpawnPoints[i]);
+            Vector3[] spawns = colony != null ? ColonyZakuSpawns() : ZakuSpawnPoints;
+            for (int i = 0; i < spawns.Length; i++)
+                PlaceZakuEnemy(playerGundam, i == 0 ? "ZakuEnemy" : "ZakuEnemy_" + (i + 1), spawns[i], colony);
         }
 
-        static void PlaceZakuEnemy(Transform playerGundam, string zakuName, Vector3 spawn)
+        static void PlaceZakuEnemy(Transform playerGundam, string zakuName, Vector3 spawn, ColonyStructure colony = null)
         {
             GameObject fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuModelPath);
             if (fbxAsset == null)
@@ -1796,6 +3420,7 @@ namespace Gundam.EditorTools
             ZakuCombatAI ai = instance.AddComponent<ZakuCombatAI>();
             ai.target = playerGundam;
             ai.preferredDistance = 60f;
+            ai.arena = colony; // stays in the colony city, walks around buildings
 
             // Machine gun in the right hand (per "자쿠의 머신건 ... 자쿠손에 들려주고
             // 사격을 하게 해줘").
@@ -1816,9 +3441,10 @@ namespace Gundam.EditorTools
         // ---------------------------------------------------------------
         const string ZakuGunModelPath = "Assets/Models/ZakuMachineGun/ZakuMachineGun.fbx";
         const string ZakuGunTexturePath = "Assets/Models/ZakuMachineGun/ZakuMachineGun-baseColor.png";
-        const float ZakuGunScale = 9f; // ~9 m gun for the 18 m Zaku
+        const float ZakuGunScale = 8f; // ~8 m gun for the 18 m Zaku (short enough for a two-hand hold)
         static readonly Vector3 ZakuGunModelGrip = new Vector3(0f, -0.113f, -0.170f);
         static readonly Vector3 ZakuGunModelMuzzle = new Vector3(0f, -0.015f, 0.499f);
+        static readonly Vector3 ZakuGunModelForeGrip = new Vector3(0f, -0.090f, 0.219f); // knurled grip under the barrel (left hand)
         static readonly Vector3 ZakuGunGripThumb = new Vector3(0f, 1f, 0.45f); // pistol grip raked back
         // Grip point inside the Zaku's closed right fist, in RightHand bone axes,
         // model (unscaled) units - measured from the Zaku's fist mesh.
@@ -1868,6 +3494,13 @@ namespace Gundam.EditorTools
             mg.upperArm = upper;
             mg.foreArm = fore;
             mg.hand = hand;
+            // Two-hand firing stance (per "자쿠가 총쏘는 자세로 자쿠머신건을 잡고 쏘는거야").
+            mg.leftUpperArm = FindDeepChild(zaku.transform, "LeftArm");
+            mg.leftForeArm = FindDeepChild(zaku.transform, "LeftForeArm");
+            mg.leftHand = FindDeepChild(zaku.transform, "LeftHand");
+            mg.chest = FindDeepChild(zaku.transform, "Spine2") ?? FindDeepChild(zaku.transform, "Spine1");
+            mg.head = FindDeepChild(zaku.transform, "Head");
+            mg.supportPoint = ZakuGunModelForeGrip * ZakuGunScale;
             mg.gun = holder.transform;
             mg.gripPoint = ZakuGunModelGrip * ZakuGunScale;
             mg.muzzlePoint = ZakuGunModelMuzzle * ZakuGunScale;
@@ -3371,8 +5004,13 @@ namespace Gundam.EditorTools
         const float SeatedShoulderAboveSeat = 0.58f;
         const float SeatedShoulderHalfWidth = 0.19f;
         const float ShoulderDepthFromBackrest = 0.08f;
-        const float TLeverReachForward = 0.34f;   // grip in front of the shoulder
-        const float TLeverOutboard = 0.14f;       // grip outboard of the shoulder
+        // Per "위아래로 이동하는 손잡이가 너무 뒤에 있어 조금 앞으로 옮겨줘 근데 왼손
+        // 조종기를 방해하지 않게": 8 cm further forward (0.34 -> 0.42) and 3 cm more
+        // outboard (0.14 -> 0.17) - grip now ~(-0.36, 1.04, 0.09): still 9 cm behind,
+        // 14 cm outboard of and 15 cm above LeftJoystick's grip ball (-0.22, ~0.89,
+        // 0.18), so a hand on either never touches the other.
+        const float TLeverReachForward = 0.42f;   // grip in front of the shoulder
+        const float TLeverOutboard = 0.17f;       // grip outboard of the shoulder
         const float TLeverBelowShoulder = 0.02f;
         const float TLeverStemLength = 0.16f;
 

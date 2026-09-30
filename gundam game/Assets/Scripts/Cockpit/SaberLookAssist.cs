@@ -21,6 +21,8 @@ namespace Gundam.Cockpit
         public WeaponModeController modes;
         public CockpitViewController viewController;
         public OrbitHUDTargetLock targetLock;
+        [Tooltip("Follow only the enemy the ring has locked (nothing locked = RightJoystick turns the view).")]
+        public bool followOnlyLocked = true;
 
         /// <summary>The enemy the view is currently following (null = none).</summary>
         public Transform Target { get; private set; }
@@ -43,12 +45,19 @@ namespace Gundam.Cockpit
                 return;
             }
 
+            // Per "빔샤벨 상태에서 아무도 락온 안되어있을때는 화면조작 락온이 되면 그때
+            // 공격기능으로": follow ONLY an enemy the ring has locked. With nothing
+            // locked the view is the pilot's again (RightJoystick turns it - see
+            // WeaponModeController), so no more falling back to the last/nearest enemy
+            // (followOnlyLocked = false restores that old behaviour).
             if (targetLock != null && targetLock.CurrentTarget != null && Alive(targetLock.CurrentTarget))
                 Target = targetLock.CurrentTarget;
+            else if (followOnlyLocked)
+                Target = null;
             else if (Target == null || !Alive(Target))
                 Target = _lastLocked != null && Alive(_lastLocked) ? _lastLocked : null;
 
-            if (Target == null)
+            if (Target == null && !followOnlyLocked)
             {
                 _rescanTimer -= Time.deltaTime;
                 if (_rescanTimer <= 0f)
@@ -83,15 +92,28 @@ namespace Gundam.Cockpit
             return best;
         }
 
-        /// <summary>Center of the enemy's visible body (renderer bounds), so the view
-        /// centers on the suit rather than on its feet (the transform pivot).</summary>
-        static Vector3 AimPoint(Transform t)
+        /// <summary>The enemy's HEAD - per "빔샤벨을 가지고 상대에게 다가가면 시야가
+        /// 아래로 떨어짐 락온한 상대에 머리쪽을 바라보게": looking at the body's
+        /// center made the view tip further and further down as the Gundam closed in
+        /// (the center is well below the Gundam's own head camera). Uses the target's
+        /// "Head" bone when it has one, else a point near the top of its body.</summary>
+        Vector3 AimPoint(Transform t)
         {
+            if (t != _headOwner)
+            {
+                _headOwner = t;
+                _head = null;
+                foreach (Transform c in t.GetComponentsInChildren<Transform>(true))
+                    if (c.name == "Head") { _head = c; break; }
+            }
+            if (_head != null) return _head.position;
             Renderer[] rs = t.GetComponentsInChildren<Renderer>();
             if (rs.Length == 0) return t.position;
             Bounds b = rs[0].bounds;
             for (int i = 1; i < rs.Length; i++) b.Encapsulate(rs[i].bounds);
-            return b.center;
+            return b.center + Vector3.up * (b.extents.y * 0.75f);
         }
+
+        Transform _headOwner, _head;
     }
 }

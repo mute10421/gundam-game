@@ -76,7 +76,9 @@ namespace Gundam.Cockpit
         [Tooltip("Colony battlefield: enemies hidden behind its buildings / walls can't be locked. Found automatically if empty.")]
         public ColonyStructure colony;
         [Tooltip("A locked enemy that goes out of sight stays locked this long (s) - so a thin pillar doesn't break the lock.")]
-        public float occludedGrace = 0.35f;
+        public float occludedGrace = 0.6f;
+        [Tooltip("A new target must stay in clear sight this long (s) before it can be captured - stops the ring flashing on/off at building edges.")]
+        public float captureSightTime = 0.15f;
 
         /// <summary>The currently captured target (null = none).</summary>
         public Transform CurrentTarget { get; private set; }
@@ -103,6 +105,7 @@ namespace Gundam.Cockpit
         bool _haveLockPose;
         bool _lockedMatOn;
         float _occludedTimer;
+        readonly System.Collections.Generic.Dictionary<Transform, float> _seenSince = new System.Collections.Generic.Dictionary<Transform, float>();
         bool _colonySearched;
 
         void Awake()
@@ -164,11 +167,17 @@ namespace Gundam.Cockpit
                 // survives only a short occlusion.
                 if (!InSight(c))
                 {
+                    _seenSince.Remove(c);
                     if (c != CurrentTarget) continue;
                     _occludedTimer += Time.deltaTime;
                     if (_occludedTimer > occludedGrace) continue;
                 }
-                else if (c == CurrentTarget) _occludedTimer = 0f;
+                else
+                {
+                    if (!_seenSince.TryGetValue(c, out float since)) { since = Time.time; _seenSince[c] = since; }
+                    if (c == CurrentTarget) _occludedTimer = 0f;
+                    else if (Time.time - since < captureSightTime) continue;
+                }
                 float score = c == CurrentTarget ? off * 0.5f : off; // prefer keeping the current lock
                 if (score < bestScore)
                 {

@@ -7,6 +7,10 @@ namespace Gundam.Cockpit
     /// each frame the path it covered is tested against the player's Gundam body
     /// capsule (PlayerHealth.CapsuleHit) - no physics collider involved, so it
     /// can't tunnel and never touches anything else. On a hit: damage + a spark.
+    ///
+    /// WALLS (per "총알이 건물을 뚫으면 안됨"): the same path is also tested
+    /// against the colony (buildings, land, hull, caps - ColonyStructure.Raycast);
+    /// a round that hits a wall first stops there with a spark.
     /// </summary>
     public class ZakuBullet : MonoBehaviour
     {
@@ -29,6 +33,10 @@ namespace Gundam.Cockpit
 
             Vector3 from = transform.position;
             Vector3 to = from + direction * speed * dt;
+            ColonyStructure colony = ColonyStructure.Active;
+            Vector3 wallPoint = default;
+            bool wall = colony != null && colony.Raycast(from, to, out wallPoint);
+            if (wall) to = wallPoint;
             if (target != null && !target.IsDown && target.CapsuleHit(from, to, radius, out Vector3 p))
             {
                 target.TakeDamage(damage, p);
@@ -46,7 +54,26 @@ namespace Gundam.Cockpit
                 Destroy(gameObject);
                 return;
             }
+            if (wall)
+            {
+                Spark(to);
+                Destroy(gameObject);
+                return;
+            }
             transform.position = to;
+        }
+
+        void Spark(Vector3 p)
+        {
+            if (sparkMaterial == null) return;
+            GameObject s = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            s.name = "ZakuBulletWallHit";
+            Collider c = s.GetComponent<Collider>();
+            if (c != null) Destroy(c);
+            s.GetComponent<Renderer>().sharedMaterial = sparkMaterial;
+            s.transform.position = p;
+            s.transform.localScale = Vector3.one * sparkSize * 0.7f;
+            Destroy(s, 0.06f);
         }
     }
 }

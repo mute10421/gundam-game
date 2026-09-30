@@ -12,6 +12,9 @@ namespace Gundam.Cockpit
     /// things that can actually take a hit stop it: an EnemyHealth (takes
     /// `damage`) or a practice HitTarget (OnHit). Every other collider (cockpit
     /// interior, controls, ...) is ignored and the tracer flies through.
+    ///
+    /// WALLS (per "총알이 건물을 뚫으면 안됨"): the colony's buildings, land, hull
+    /// and caps (ColonyStructure.Raycast) stop the tracer where it hits them.
     /// </summary>
     public class HeadVulcanBullet : MonoBehaviour
     {
@@ -49,15 +52,20 @@ namespace Gundam.Cockpit
 
             Vector3 seg = tip - _lastTip;
             float len = seg.magnitude;
+            ColonyStructure colony = ColonyStructure.Active;
+            Vector3 wallPoint = default;
+            bool wall = colony != null && len > 0.0001f && colony.Raycast(_lastTip, tip, out wallPoint);
+            float reach = wall ? Vector3.Distance(_lastTip, wallPoint) : len;
             if (len > 0.0001f)
             {
-                RaycastHit[] hits = Physics.RaycastAll(_lastTip, seg / len, len, ~0, QueryTriggerInteraction.Collide);
+                RaycastHit[] hits = Physics.RaycastAll(_lastTip, seg / len, reach, ~0, QueryTriggerInteraction.Collide);
                 if (hits.Length > 1) System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
                 foreach (RaycastHit h in hits)
                 {
                     if (TryHit(h)) return;
                 }
             }
+            if (wall) { Impact(wallPoint); return; }
             _lastTip = tip;
         }
 

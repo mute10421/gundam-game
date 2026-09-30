@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Gundam.Cockpit
@@ -154,56 +155,161 @@ namespace Gundam.Cockpit
             return feet;
         }
 
+        /// <summary>The colony in the scene (set while enabled) - for bullets and
+        /// other things spawned at runtime that need to know about its walls.</summary>
+        public static ColonyStructure Active { get; private set; }
+
+        void OnEnable() { if (Active == null) Active = this; }
+        void OnDisable() { if (Active == this) Active = null; }
+
         /// <summary>
         /// Line of sight (per "건물뒤에 보이지 않는 적은 락온되면 안됨"): true if the
         /// straight line from a to b is blocked by the colony - a building box, the
-        /// end caps (except through the breach) or the hull (seen from outside).
+        /// land, the end caps (except through the breach) or the hull.
         /// Inside-to-inside lines never touch the hull (the cylinder is convex).
         /// </summary>
         public bool SegmentBlocked(Vector3 a, Vector3 b)
         {
+            return Raycast(a, b, out Vector3 _);
+        }
+
+        /// <summary>
+        /// First point where the segment a->b hits the colony (building, land,
+        /// hull, end caps; the breach is open) - per "총알이 건물을 뚫으면 안됨".
+        /// </summary>
+        public bool Raycast(Vector3 a, Vector3 b, out Vector3 hit)
+        {
+            float best = 2f;
+            if (SegmentFirstBoxHit(a, b, out float tb)) best = tb;
+
             bool ia = IsInside(a), ib = IsInside(b);
             if (ia != ib)
             {
-                // Find where the line crosses the colony's skin; only the breach is open.
-                Vector3 inP = ia ? a : b, outP = ia ? b : a;
+                // Where the line crosses the colony's skin; only the breach is open.
+                float tIn = ia ? 0f : 1f, tOut = ia ? 1f : 0f;
                 for (int i = 0; i < 24; i++)
                 {
-                    Vector3 m = (inP + outP) * 0.5f;
-                    if (IsInside(m)) inP = m; else outP = m;
+                    float tm = (tIn + tOut) * 0.5f;
+                    if (IsInside(Vector3.Lerp(a, b, tm))) tIn = tm; else tOut = tm;
                 }
-                float z = inP.z - nearCapCenter.z;
-                bool throughBreach = z < 2f && Mathf.Abs(inP.x - nearCapCenter.x) < breachHalfWidth && inP.y < breachTop;
-                if (!throughBreach) return true;
+                Vector3 pIn = Vector3.Lerp(a, b, tIn);
+                float z = pIn.z - nearCapCenter.z;
+                bool throughBreach = z < 2f && Mathf.Abs(pIn.x - nearCapCenter.x) < breachHalfWidth && pIn.y < breachTop;
+                if (!throughBreach && tIn < best) best = tIn;
             }
             else if (!ia)
             {
-                // Both outside: blocked if the line passes through the colony.
-                for (int i = 1; i < 32; i++)
-                    if (IsInside(Vector3.Lerp(a, b, i / 32f))) return true;
-                return false;
+                // Both outside: blocked where the line enters the colony (unless it
+                // enters through the breach).
+                const int N = 32;
+                for (int i = 1; i < N; i++)
+                {
+                    float ti = i / (float)N;
+                    if (ti >= best) break;
+                    if (!IsInside(Vector3.Lerp(a, b, ti))) continue;
+                    float tOut = (i - 1) / (float)N, tIn = ti;
+                    for (int k = 0; k < 20; k++)
+                    {
+                        float tm = (tIn + tOut) * 0.5f;
+                        if (IsInside(Vector3.Lerp(a, b, tm))) tIn = tm; else tOut = tm;
+                    }
+                    Vector3 pIn = Vector3.Lerp(a, b, tIn);
+                    float z = pIn.z - nearCapCenter.z;
+                    bool throughBreach = z < 2f && Mathf.Abs(pIn.x - nearCapCenter.x) < breachHalfWidth && pIn.y < breachTop;
+                    if (!throughBreach && tIn < best) best = tIn;
+                    break;
+                }
             }
-            return SegmentHitsBoxes(a, b);
+            if (best > 1f) { hit = b; return false; }
+            hit = Vector3.Lerp(a, b, best);
+            return true;
         }
 
         /// <summary>Does the segment a-b pass through any building box?</summary>
         public bool SegmentHitsBoxes(Vector3 a, Vector3 b)
         {
+            return SegmentFirstBoxHit(a, b, out float _);
+        }
+
+        /// <summary>Nearest building box the segment a-b enters (t = 0..1 along it).</summary>
+        public bool SegmentFirstBoxHit(Vector3 a, Vector3 b, out float tHit)
+        {
+            tHit = 2f;
             if (boxMin == null || boxMax == null) return false;
+            EnsureGrid();
             Vector3 d = b - a;
             Vector3 lo = Vector3.Min(a, b), hi = Vector3.Max(a, b);
+            _stampId++;
+            int cx0 = Cell(lo.x), cx1 = Cell(hi.x), cz0 = Cell(lo.z), cz1 = Cell(hi.z);
+            if ((long)(cx1 - cx0 + 1) * (cz1 - cz0 + 1) > 4096) return SegmentFirstBoxHitBrute(a, b, out tHit);
+            for (int cx = cx0; cx <= cx1; cx++)
+                for (int cz = cz0; cz <= cz1; cz++)
+                {
+                    if (!_grid.TryGetValue(Key(cx, cz), out List<int> list)) continue;
+                    for (int k = 0; k < list.Count; k++)
+                    {
+                        int i = list[k];
+                        if (_stamp[i] == _stampId) continue;
+                        _stamp[i] = _stampId;
+                        Vector3 mn = boxMin[i], mx = boxMax[i];
+                        if (mx.x < lo.x || mn.x > hi.x || mx.y < lo.y || mn.y > hi.y || mx.z < lo.z || mn.z > hi.z) continue;
+                        float t0 = 0f, t1 = 1f;
+                        if (!Slab(a.x, d.x, mn.x, mx.x, ref t0, ref t1)) continue;
+                        if (!Slab(a.y, d.y, mn.y, mx.y, ref t0, ref t1)) continue;
+                        if (!Slab(a.z, d.z, mn.z, mx.z, ref t0, ref t1)) continue;
+                        if (t0 < tHit) tHit = t0;
+                    }
+                }
+            return tHit <= 1f;
+        }
+
+        bool SegmentFirstBoxHitBrute(Vector3 a, Vector3 b, out float tHit)
+        {
+            tHit = 2f;
+            Vector3 d = b - a;
             int n = Mathf.Min(boxMin.Length, boxMax.Length);
             for (int i = 0; i < n; i++)
             {
                 Vector3 mn = boxMin[i], mx = boxMax[i];
-                if (mx.x < lo.x || mn.x > hi.x || mx.y < lo.y || mn.y > hi.y || mx.z < lo.z || mn.z > hi.z) continue;
                 float t0 = 0f, t1 = 1f;
                 if (!Slab(a.x, d.x, mn.x, mx.x, ref t0, ref t1)) continue;
                 if (!Slab(a.y, d.y, mn.y, mx.y, ref t0, ref t1)) continue;
                 if (!Slab(a.z, d.z, mn.z, mx.z, ref t0, ref t1)) continue;
-                return true;
+                if (t0 < tHit) tHit = t0;
             }
-            return false;
+            return tHit <= 1f;
+        }
+
+        // --- Uniform grid over the building boxes (x/z), so line-of-sight, bullet
+        //     and walking queries only test the few boxes nearby. ---
+        const float GridCell = 128f;
+        Dictionary<long, List<int>> _grid;
+        int _gridCount = -1;
+        int[] _stamp;
+        int _stampId;
+
+        static int Cell(float v) => Mathf.FloorToInt(v / GridCell);
+        static long Key(int cx, int cz) => ((long)cx << 32) ^ (uint)cz;
+
+        void EnsureGrid()
+        {
+            int n = boxMin != null && boxMax != null ? Mathf.Min(boxMin.Length, boxMax.Length) : 0;
+            if (_grid != null && _gridCount == n) return;
+            _grid = new Dictionary<long, List<int>>();
+            _stamp = new int[Mathf.Max(1, n)];
+            _stampId = 0;
+            _gridCount = n;
+            for (int i = 0; i < n; i++)
+            {
+                int cx0 = Cell(boxMin[i].x), cx1 = Cell(boxMax[i].x), cz0 = Cell(boxMin[i].z), cz1 = Cell(boxMax[i].z);
+                for (int cx = cx0; cx <= cx1; cx++)
+                    for (int cz = cz0; cz <= cz1; cz++)
+                    {
+                        long key = Key(cx, cz);
+                        if (!_grid.TryGetValue(key, out List<int> list)) { list = new List<int>(); _grid[key] = list; }
+                        list.Add(i);
+                    }
+            }
         }
 
         static bool Slab(float o, float d, float mn, float mx, ref float t0, ref float t1)
@@ -216,14 +322,32 @@ namespace Gundam.Cockpit
             return t0 <= t1;
         }
 
+        readonly List<int> _near = new List<int>();
+
         bool ResolveBoxes(ref Vector3 feet, float height, float r, out bool onRoof, bool allowRoof = true)
         {
             onRoof = false;
             bool hit = false;
             if (boxMin == null || boxMax == null) return false;
-            int n = Mathf.Min(boxMin.Length, boxMax.Length);
-            for (int i = 0; i < n; i++)
+            EnsureGrid();
+            _stampId++;
+            int gx0 = Cell(feet.x - r), gx1 = Cell(feet.x + r), gz0 = Cell(feet.z - r), gz1 = Cell(feet.z + r);
+            _near.Clear();
+            for (int gx = gx0; gx <= gx1; gx++)
+                for (int gz = gz0; gz <= gz1; gz++)
+                {
+                    if (!_grid.TryGetValue(Key(gx, gz), out List<int> list)) continue;
+                    for (int k = 0; k < list.Count; k++)
+                    {
+                        int bi = list[k];
+                        if (_stamp[bi] == _stampId) continue;
+                        _stamp[bi] = _stampId;
+                        _near.Add(bi);
+                    }
+                }
+            for (int ni = 0; ni < _near.Count; ni++)
             {
+                int i = _near[ni];
                 Vector3 mn = boxMin[i], mx = boxMax[i];
                 if (feet.x < mn.x - r || feet.x > mx.x + r || feet.z < mn.z - r || feet.z > mx.z + r) continue;
                 if (feet.y > mx.y + 0.05f || feet.y + height <= mn.y) continue;              // over / under it

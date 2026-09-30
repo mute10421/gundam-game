@@ -9,6 +9,9 @@ namespace Gundam.Cockpit
     /// reacts to things that can take a hit (EnemyHealth, or the old HitTarget
     /// practice targets) and passes through everything else (cockpit parts, the
     /// pilot's own Gundam, debris). On a hit: damage, a short flash, gone.
+    ///
+    /// WALLS (per "총알이 건물을 뚫으면 안됨"): the colony's buildings, land, hull
+    /// and caps (ColonyStructure.Raycast) stop the bolt with a flash.
     /// </summary>
     public class BeamRifleShot : MonoBehaviour
     {
@@ -33,6 +36,10 @@ namespace Gundam.Cockpit
 
             Vector3 from = transform.position;
             float dist = speed * dt;
+            ColonyStructure colony = ColonyStructure.Active;
+            Vector3 wallPoint = default;
+            bool wall = colony != null && colony.Raycast(from, from + direction * dist, out wallPoint);
+            if (wall) dist = Vector3.Distance(from, wallPoint);
             int n = Physics.SphereCastNonAlloc(from, hitRadius, direction, _hits, dist, ~0, QueryTriggerInteraction.Collide);
             float best = float.MaxValue;
             int bestI = -1;
@@ -58,6 +65,12 @@ namespace Gundam.Cockpit
                     if (ht != null) ht.OnHit();
                 }
                 Flash(p);
+                Destroy(gameObject);
+                return;
+            }
+            if (wall)
+            {
+                Flash(wallPoint);
                 Destroy(gameObject);
                 return;
             }

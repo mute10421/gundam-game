@@ -35,6 +35,15 @@ namespace Gundam.Cockpit
     /// (ColonyStructure.ResolveWalker), so it never leaves the colony to chase
     /// the Gundam across open space.
     ///
+    /// SIGHT (per "자쿠도 내가 건물뒤에 있으면 몰라야 하고"): the Zaku only knows
+    /// where the Gundam is while it can actually SEE it - within sightRange and
+    /// with a clear line from its eyes to the Gundam's body or head
+    /// (ColonyStructure.SegmentBlocked: buildings, land, hull and caps block it).
+    /// Hidden behind a building, the Gundam is lost: the Zaku walks to where it
+    /// last saw it, searches around there for a while, then goes back to its
+    /// patrol. It never tracks, faces or shoots at a Gundam it can't see
+    /// (ZakuMachineGun checks CanSeeTarget too).
+    ///
     /// Only moves/poses its OWN transform and bones - never the player's suit,
     /// cameras or XR rig. Stops while EnemyHealth reports it destroyed and
     /// resets its velocity when it respawns.
@@ -115,6 +124,23 @@ namespace Gundam.Cockpit
         public float patrolRadius = 70f;
         public float patrolSpeed = 5f;
 
+        [Header("Sight (per \"건물뒤에 있으면 몰라야\")")]
+        [Tooltip("Eye height (m) above the Zaku's feet.")]
+        public float eyeHeight = 16f;
+        [Tooltip("How often (s) line of sight is re-checked.")]
+        public float sightInterval = 0.2f;
+        [Tooltip("Seconds the Zaku keeps hunting the last place it saw the Gundam.")]
+        public float memoryTime = 12f;
+        public float huntSpeed = 9f;
+        [Tooltip("Radius (m) it searches around the last known position.")]
+        public float searchRadius = 45f;
+
+        /// <summary>True while the Zaku can see the Gundam (in range, nothing in between).</summary>
+        public bool CanSeeTarget { get; private set; }
+        /// <summary>Where it last saw the Gundam (valid while HasLastKnown).</summary>
+        public Vector3 LastKnownPosition { get; private set; }
+        public bool HasLastKnown => _haveLastKnown && Time.time - _lastSeenTime < memoryTime;
+
         [Header("Procedural walk")]
         public bool animateBody = true;
         [Tooltip("Metres covered per step.")]
@@ -146,6 +172,11 @@ namespace Gundam.Cockpit
         float _yawVel;
         float _lead;
         float _seed;
+        float _sightTimer;
+        float _lastSeenTime = -999f;
+        bool _haveLastKnown;
+        Vector3 _searchPoint;
+        float _searchTimer;
         static readonly System.Collections.Generic.List<ZakuCombatAI> s_all = new System.Collections.Generic.List<ZakuCombatAI>();
 
         // Bones (all optional - missing ones are just skipped).
@@ -241,11 +272,31 @@ namespace Gundam.Cockpit
             if (_health != null && _health.IsDead)
             {
                 Velocity = Vector3.zero;
+                CanSeeTarget = false;
                 return;
             }
-            if (target == null) return;
+            if (target == null) { CanSeeTarget = false; return; }
 
             float dt = Time.deltaTime;
+
+            _sightTimer -= dt;
+            if (_sightTimer <= 0f)
+            {
+                _sightTimer = sightInterval;
+                CanSeeTarget = LookForTarget();
+                if (CanSeeTarget)
+                {
+                    LastKnownPosition = target.position;
+                    _lastSeenTime = Time.time;
+                    _haveLastKnown = true;
+                }
+            }
+            if (!CanSeeTarget)
+            {
+                if (HasLastKnown) Hunt(dt);
+                else Patrol(dt);
+                return;
+            }
 
             _maneuverTimer -= dt;
             if (_maneuverTimer <= 0f) PickManeuver();
@@ -254,11 +305,6 @@ namespace Gundam.Cockpit
             toTarget.y = 0f;
             float dist = toTarget.magnitude;
 
-            if (aggroRange > 0f && (target.position - transform.position).magnitude > aggroRange)
-            {
-                Patrol(dt);
-                return;
-            }
             Vector3 radial = dist > 0.01f ? toTarget / dist : transform.forward;
             Vector3 tangent = Vector3.Cross(Vector3.up, radial); // Zaku's own right when facing the target
 
@@ -297,6 +343,59 @@ namespace Gundam.Cockpit
                 float wantYaw = Mathf.Atan2(radial.x, radial.z) * Mathf.Rad2Deg + _lead;
                 float yaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, wantYaw, ref _yawVel,
                     Mathf.Max(0.05f, turnSmoothTime), Mathf.Max(1f, turnSpeed * 2f));
+                transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+            }
+        }
+
+        /// <summary>Can the Zaku see the Gundam right now (range + line of sight)?</summary>
+        bool LookForTarget()
+        {
+            Vector3 eye = transform.position + Vector3.up * eyeHeight;
+            Vector3 body = target.position + Vector3.up * 9f;
+            if (aggroRange > 0f && (body - eye).sqrMagnitude > aggroRange * aggroRange) return false;
+            if (arena == null) return true;
+            if (!arena.SegmentBlocked(eye, body)) return true;
+            return !arena.SegmentBlocked(eye, target.position + Vector3.up * 17f);
+        }
+
+        /// <summary>Lost sight of the Gundam: go to where it was last seen and
+        /// search around there until the memory runs out.</summary>
+        void Hunt(float dt)
+        {
+            Vector3 goal = LastKnownPosition;
+            Vector3 to = goal - transform.position;
+            to.y = 0f;
+            float speed = huntSpeed;
+            if (to.magnitude < 20f)
+            {
+                // Reached it: poke around nearby.
+                _searchTimer -= dt;
+                Vector3 toS = _searchPoint - transform.position;
+                toS.y = 0f;
+                if (_searchTimer <= 0f || toS.magnitude < 6f)
+                {
+                    Vector2 r = Random.insideUnitCircle * searchRadius;
+                    _searchPoint = goal + new Vector3(r.x, 0f, r.y);
+                    _searchTimer = Random.Range(3f, 6f);
+                    toS = _searchPoint - transform.position;
+                    toS.y = 0f;
+                }
+                to = toS;
+                speed = patrolSpeed * 1.4f;
+            }
+            Vector3 desired = to.magnitude > 1f ? to.normalized * speed : Vector3.zero;
+            desired += Separation();
+            desired.y = 0f;
+            Velocity = Vector3.SmoothDamp(Velocity, desired, ref _velRef, Mathf.Max(0.05f, velocitySmoothTime));
+            Vector3 p = transform.position + Velocity * dt;
+            p.y = _groundY;
+            if (arena != null) p = arena.ResolveWalker(p, 18f, walkerRadius);
+            transform.position = p;
+            _lead = Mathf.Lerp(_lead, 0f, 1f - Mathf.Exp(-dt * 3f));
+            if (Velocity.sqrMagnitude > 0.5f)
+            {
+                float wantYaw = Mathf.Atan2(Velocity.x, Velocity.z) * Mathf.Rad2Deg;
+                float yaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, wantYaw, ref _yawVel, 0.5f, 120f);
                 transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
         }
@@ -445,9 +544,9 @@ namespace Gundam.Cockpit
             if (_head != null)
             {
                 _head.localRotation = _headRest;
-                if (target != null)
+                if (target != null && (CanSeeTarget || HasLastKnown))
                 {
-                    Vector3 to = target.position - _head.position;
+                    Vector3 to = (CanSeeTarget ? target.position : LastKnownPosition) - _head.position;
                     to.y = 0f;
                     Vector3 fwd = transform.forward;
                     fwd.y = 0f;

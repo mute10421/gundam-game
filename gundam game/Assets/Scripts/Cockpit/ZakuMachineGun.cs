@@ -68,6 +68,8 @@ namespace Gundam.Cockpit
 
         [Header("Target")]
         public PlayerHealth target;
+        [Tooltip("Only aims/fires while this AI can SEE the target (per \"건물뒤에 있으면 몰라야\"). Found on this object if empty.")]
+        public ZakuCombatAI ai;
         [Tooltip("Aim this high above the target's root (m) - chest.")]
         public float aimHeight = 11f;
         public float engageRange = 260f;
@@ -112,6 +114,7 @@ namespace Gundam.Cockpit
         void Awake()
         {
             _health = GetComponent<EnemyHealth>();
+            if (ai == null) ai = GetComponent<ZakuCombatAI>();
             Ammo = magazine;
             if (upperArm != null && foreArm != null && hand != null)
             {
@@ -162,6 +165,7 @@ namespace Gundam.Cockpit
 
             Vector3 aimPoint = target != null ? target.transform.position + Vector3.up * aimHeight : Vector3.zero;
             bool engaged = !dead && target != null && !target.IsDown
+                && (ai == null || ai.CanSeeTarget)
                 && (aimPoint - upperArm.position).sqrMagnitude < engageRange * engageRange;
             _aim = Mathf.MoveTowards(_aim, engaged ? 1f : 0f, dt / Mathf.Max(0.05f, raiseTime));
             float w = Mathf.SmoothStep(0f, 1f, _aim);

@@ -780,7 +780,7 @@ namespace Gundam.EditorTools
         // more resolution - 512 is a reasonable middle ground for a mobile XR
         // headset (6 faces re-rendered every frame isn't free); tell me if it
         // still isn't sharp enough or if it costs too much frame rate.
-        const int HeadCam360CubemapResolution = 512;
+        const int HeadCam360CubemapResolution = 2048; // per "화질이 너무 않좋아" (was 512)
 
         // ---------------------------------------------------------------
         // External Gundam model — instantiates the imported FBX (see
@@ -996,7 +996,11 @@ namespace Gundam.EditorTools
             Camera headCam = camGo.AddComponent<Camera>();
             headCam.targetTexture = headCamTex;
             headCam.fieldOfView = 60f;
-            headCam.nearClipPlane = 0.05f;
+            // 0.05 -> 0.5 (own body is culled, nothing is that close): with a 16 km
+            // far plane a 5 cm near plane left almost no depth precision, so distant
+            // colony buildings z-fought and the head-cam feed / center display
+            // flickered ("가운데 디스플레이가 자꾸 번쩍거린").
+            headCam.nearClipPlane = 0.5f;
             headCam.clearFlags = CameraClearFlags.SolidColor;
             headCam.backgroundColor = new Color(0.01f, 0.01f, 0.025f, 1f); // same deep-space color as the main view
 
@@ -1215,7 +1219,8 @@ namespace Gundam.EditorTools
         // offset so the side screens' bottom edge sits DisplayBottomAboveGrip above
         // the joystick grip balls' top - hands on the sticks pass underneath.
         const float DisplayClusterScale = 0.5f;
-        const float DisplayBottomAboveGrip = 0.08f; // clear of the knuckles on the grip
+        // 0.08 -> 0.058: per "디스플레이를 진짜 아주 조금 아래로 내려줘 시선이 방해되서" (~2 cm lower).
+        const float DisplayBottomAboveGrip = 0.058f; // clear of the knuckles on the grip
         const float DisplayCenterScreenZ = 0.40f;   // keep the center screen where it was reachable
 
         static void ShrinkSystemCheckDisplay(Transform interior)
@@ -3309,13 +3314,16 @@ namespace Gundam.EditorTools
             return cs;
         }
 
-        /// <summary>Zaku spawn points in the downtown streets near the breach.</summary>
+        /// <summary>Zaku spawn points in the city streets (N-S street centers at
+        /// x = 0 (boulevard), +-180, +-320, +-460). Per "자쿠가 더 있어서 콜로니 안에 더
+        /// 베치 되어 있었으면 좋겠어": 10 Zakus spread from just inside the breach to
+        /// deep downtown instead of 3 near the entrance.</summary>
         static Vector3[] ColonyZakuSpawns()
         {
-            float[] xs = { 0f, -180f, 320f };
-            float[] zs = { ColonyNearZ + 600f, ColonyNearZ + 1000f, ColonyNearZ + 1500f };
-            Vector3[] p = new Vector3[3];
-            for (int i = 0; i < 3; i++) p[i] = new Vector3(xs[i], ColonyGroundY(xs[i]), zs[i]);
+            float[] xs = { 0f, -180f, 320f, 180f, -320f, -460f, 0f, 460f, -180f, 320f };
+            float[] dz = { 600f, 1000f, 1500f, 2100f, 2600f, 1800f, 3200f, 3800f, 4400f, 5200f };
+            Vector3[] p = new Vector3[xs.Length];
+            for (int i = 0; i < xs.Length; i++) p[i] = new Vector3(xs[i], ColonyGroundY(xs[i]), ColonyNearZ + dz[i]);
             return p;
         }
 
@@ -3619,11 +3627,12 @@ namespace Gundam.EditorTools
                 // keeps its GUID, so the aux screen's RawImage, the dome's
                 // material, and headCam.targetTexture all keep pointing at it
                 // correctly with nothing left dangling.
-                if (existing.width != HeadCamResolution || existing.height != HeadCamResolution)
+                if (existing.width != HeadCamResolution || existing.height != HeadCamResolution || existing.depth != 24)
                 {
                     existing.Release();
                     existing.width = HeadCamResolution;
                     existing.height = HeadCamResolution;
+                    existing.depth = 24; // 16-bit depth z-fought -> flicker
                     existing.Create();
                     EditorUtility.SetDirty(existing);
                     AssetDatabase.SaveAssets();
@@ -3633,7 +3642,7 @@ namespace Gundam.EditorTools
                 return existing;
             }
 
-            RenderTexture rt = new RenderTexture(HeadCamResolution, HeadCamResolution, 16);
+            RenderTexture rt = new RenderTexture(HeadCamResolution, HeadCamResolution, 24);
             rt.name = "GundamHeadCam";
             AssetDatabase.CreateAsset(rt, HeadCamRenderTexturePath);
             return rt;
@@ -3651,11 +3660,13 @@ namespace Gundam.EditorTools
             if (existing != null)
             {
                 if (existing.width != HeadCam360CubemapResolution ||
+                    existing.depth != 24 ||
                     existing.dimension != UnityEngine.Rendering.TextureDimension.Cube)
                 {
                     existing.Release();
                     existing.width = HeadCam360CubemapResolution;
                     existing.height = HeadCam360CubemapResolution;
+                    existing.depth = 24; // 16-bit depth z-fought (flickered) at 16 km far plane
                     existing.dimension = UnityEngine.Rendering.TextureDimension.Cube;
                     existing.Create();
                     EditorUtility.SetDirty(existing);
@@ -3666,7 +3677,7 @@ namespace Gundam.EditorTools
                 return existing;
             }
 
-            RenderTexture rt = new RenderTexture(HeadCam360CubemapResolution, HeadCam360CubemapResolution, 16);
+            RenderTexture rt = new RenderTexture(HeadCam360CubemapResolution, HeadCam360CubemapResolution, 24);
             rt.dimension = UnityEngine.Rendering.TextureDimension.Cube;
             rt.name = "GundamHeadCam360Cubemap";
             AssetDatabase.CreateAsset(rt, HeadCam360CubemapRenderTexturePath);
@@ -4304,7 +4315,9 @@ namespace Gundam.EditorTools
             if (panelRoot != null)
             {
                 canvasGo.transform.SetParent(panelRoot, false);
-                float frontFaceOffset = anchor.localScale.z * 0.5f + 0.002f;
+                // 2 mm -> 5 mm: at the CockpitStation's far world coordinates the
+                // screen box and this canvas z-fought ("가운데 디스플레이가 자꾸 번쩍거린").
+                float frontFaceOffset = anchor.localScale.z * 0.5f + 0.005f;
                 canvasGo.transform.localPosition = anchor.localPosition + anchor.localRotation * new Vector3(0f, 0f, -frontFaceOffset);
                 canvasGo.transform.localRotation = anchor.localRotation;
             }

@@ -22,6 +22,11 @@ namespace Gundam.Cockpit
     /// guards on them being null, so this is a no-op, not a break.</summary>
     public class CockpitHUD : MonoBehaviour
     {
+        const float MsToKmh = 3.6f;
+
+        [Tooltip("Shown on the info line (\"GUNDAM COCKPIT\" / \"ZAKU II COCKPIT\").")]
+        public string mechName = "GUNDAM";
+
         public JoystickLever leftStick;
         public JoystickLever rightStick;
         public Text infoText;
@@ -53,10 +58,11 @@ namespace Gundam.Cockpit
 
                 // ALT / vertical speed from the T lever (VerticalThrustController),
                 // appended to the HEADING line so the panel keeps its 3 lines.
-                string alt = vertical != null ? $"   ALT {vertical.Altitude:0}m {vertical.CurrentVerticalSpeed:+0.0;-0.0;0.0}" : "";
+                // Vertical speed in km/h (per "속도 단위는 km/h로 해줘").
+                string alt = vertical != null ? $"   ALT {vertical.Altitude:0}m {vertical.CurrentVerticalSpeed * MsToKmh:+0;-0;0}km/h" : "";
                 if (vertical != null && vertical.lever != null && vertical.lever.IsGrabbed) alt += $" [T {vertical.lever.VerticalInput:+0.0;-0.0;0.0}]";
                 infoText.text =
-                    "GUNDAM COCKPIT\n" +
+                    mechName + " COCKPIT\n" +
                     $"THROTTLE {l.y * 100f:0}%   TURN {l.x * 100f:0}%\n" +
                     $"HEADING {headingDeg:000}°" + alt +
                     (leftStick != null && leftStick.isGrabbed ? "  [L GRIP]" : "");
@@ -64,7 +70,11 @@ namespace Gundam.Cockpit
 
             if (speedText != null && ship != null)
             {
-                speedText.text = $"SPEED {Mathf.Abs(ship.CurrentSpeed):0.0} m/s";
+                // km/h (per "속도 단위는 km/h로 해줘"), and the suit's whole speed -
+                // horizontal (LeftJoystick) and vertical (T lever) together.
+                float planar = Mathf.Abs(ship.CurrentSpeed);
+                float climb = vertical != null ? vertical.CurrentVerticalSpeed : 0f;
+                speedText.text = $"SPEED {Mathf.Sqrt(planar * planar + climb * climb) * MsToKmh:0} km/h";
             }
 
             if (statusText != null && hudManager != null)

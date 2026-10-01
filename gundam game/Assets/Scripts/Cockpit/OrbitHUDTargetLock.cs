@@ -59,10 +59,20 @@ namespace Gundam.Cockpit
         public float releaseTime = 0.4f;
         [Tooltip("Locked circle = enemy's apparent size x this (a little room around it).")]
         public float sizeMargin = 1.1f;
-        [Tooltip("Smallest the locked circle gets (m, on the ring plane).")]
-        public float minLockRadius = 0.08f;
-        [Tooltip("Tick size when fully locked (1 = unchanged).")]
+        [Tooltip("Smallest the locked circle gets (m, on the ring plane). Was 0.08 - per \"락온이 거리에 따라서 작아졌으면\" it now keeps shrinking with distance almost to the enemy's real apparent size.")]
+        public float minLockRadius = 0.035f;
+        [Tooltip("Largest tick size when fully locked (1 = unchanged).")]
         [Range(0.1f, 1f)] public float lockedTickScale = 0.5f;
+
+        [Header("Small (far) lock (per \"멀리있는 적을 락온하면 너무 뭉쳐서 덩어리로 보임\")")]
+        [Tooltip("Locked tick size = locked circle radius x this (capped at lockedTickScale), so a small far-away lock gets proportionally small ticks instead of a clump.")]
+        public float tickScalePerRadius = 2.2f;
+        [Tooltip("Ticks never shrink below this scale.")]
+        public float minLockedTickScale = 0.06f;
+        [Tooltip("Locked circle radius (m) below which the minor ticks fade out (start, end).")]
+        public Vector2 minorTicksFade = new Vector2(0.5f, 0.25f);
+        [Tooltip("Locked circle radius (m) below which the major ticks fade out too, leaving only the 4 gate brackets (start, end).")]
+        public Vector2 majorTicksFade = new Vector2(0.2f, 0.1f);
         [Tooltip("How quickly the locked circle follows the enemy's position/size.")]
         public float followSharpness = 12f;
 
@@ -94,6 +104,7 @@ namespace Gundam.Cockpit
             public Vector2 dir;
             public Renderer[] renderers;
             public Material[] materials;
+            public int tier; // 0 minor tick, 1 major tick, 2 gate bracket
         }
 
         readonly List<Tick> _ticks = new List<Tick>();
@@ -115,6 +126,16 @@ namespace Gundam.Cockpit
             {
                 Vector3 p = child.localPosition;
                 Vector2 d = new Vector2(p.x, p.y);
+                // Tier from the ring layout (BuildOrbitHUD: 60 marks, every 6 deg;
+                // every 5th is a major tick, the 4 at 0/90/180/270 are gates).
+                int tier = 0;
+                if (child.name.Contains("Gate")) tier = 2;
+                else if (d.sqrMagnitude > 1e-6f)
+                {
+                    float ang = Mathf.Atan2(d.x, d.y) * Mathf.Rad2Deg;
+                    int idx = ((Mathf.RoundToInt(ang / 6f) % 60) + 60) % 60;
+                    tier = idx % 5 == 0 ? 1 : 0;
+                }
                 Renderer[] rs = child.GetComponentsInChildren<Renderer>(true);
                 Material[] ms = new Material[rs.Length];
                 for (int i = 0; i < rs.Length; i++) ms[i] = rs[i].sharedMaterial;
@@ -126,6 +147,7 @@ namespace Gundam.Cockpit
                     dir = d.sqrMagnitude > 1e-6f ? d.normalized : Vector2.up,
                     renderers = rs,
                     materials = ms,
+                    tier = tier,
                 });
             }
             _radius = ringRadius;
@@ -215,17 +237,43 @@ namespace Gundam.Cockpit
             ApplyRing();
         }
 
+        /// <summary>The ring's own colors changed (cockpit re-tint for the ZAKU): take
+        /// the ticks' current materials as their normal (unlocked) look.</summary>
+        public void RefreshMaterials()
+        {
+            if (_lockedMatOn) return;
+            for (int i = 0; i < _ticks.Count; i++)
+            {
+                Tick k = _ticks[i];
+                for (int r = 0; r < k.renderers.Length; r++)
+                    if (k.renderers[r] != null) k.materials[r] = k.renderers[r].sharedMaterial;
+            }
+        }
+
         void ApplyRing()
         {
             float e = _t * _t * (3f - 2f * _t); // smoothstep
-            float tickScale = Mathf.Lerp(1f, lockedTickScale, e);
+            // Locked ticks scale with the locked circle, so a far (small) target
+            // gets a small, clean reticle instead of full-size ticks piled up.
+            float lockedScale = Mathf.Clamp(_radius * tickScalePerRadius, minLockedTickScale, lockedTickScale);
+            float tickScale = Mathf.Lerp(1f, lockedScale, e);
+            // ...and on a small circle the minor, then the major ticks fade out,
+            // leaving just the 4 gate brackets around a distant enemy.
+            float minorMul = Mathf.Lerp(1f, Mathf.InverseLerp(minorTicksFade.y, minorTicksFade.x, _radius), e);
+            float majorMul = Mathf.Lerp(1f, Mathf.InverseLerp(majorTicksFade.y, majorTicksFade.x, _radius), e);
             for (int i = 0; i < _ticks.Count; i++)
             {
                 Tick k = _ticks[i];
                 if (k.t == null) continue;
                 Vector3 locked = new Vector3(_center.x + k.dir.x * _radius, _center.y + k.dir.y * _radius, k.pos.z);
                 k.t.localPosition = Vector3.Lerp(k.pos, locked, e);
-                k.t.localScale = k.scale * tickScale;
+                float mul = k.tier == 0 ? minorMul : (k.tier == 1 ? majorMul : 1f);
+                k.t.localScale = k.scale * (tickScale * mul);
+                bool show = mul > 0.01f;
+                for (int r = 0; r < k.renderers.Length; r++)
+                {
+                    if (k.renderers[r] != null && k.renderers[r].enabled != show) k.renderers[r].enabled = show;
+                }
             }
 
             bool wantLockedMat = lockedMaterial != null && e >= 0.98f;

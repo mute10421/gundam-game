@@ -70,6 +70,26 @@ namespace Gundam.Cockpit
         public PlayerHealth target;
         [Tooltip("Only aims/fires while this AI can SEE the target (per \"건물뒤에 있으면 몰라야\"). Found on this object if empty.")]
         public ZakuCombatAI ai;
+
+        [Header("Sound (per \"이거를 자쿠가 총을 쏘는 소리로 넣어줘\")")]
+        [Tooltip("Played for every round fired.")]
+        public AudioClip fireSound;
+        [Range(0f, 1f)] public float fireVolume = 0.8f;
+        [Tooltip("Pitch variation (+-) per burst.")]
+        [Range(0f, 0.2f)] public float firePitchJitter = 0.05f;
+        [Tooltip("Full volume within this distance (m) of the pilot's Gundam; quieter farther away (1/distance).")]
+        public float soundFullVolumeRange = 80f;
+        [Tooltip("Not heard at all beyond this distance (m).")]
+        public float soundMaxRange = 1500f;
+        // The clip is a recorded burst, looped while firing (see LoopingFireSound).
+        [Tooltip("The clip is a recorded burst - loop it while firing. Off = one shot per round (a single beam shot, e.g. the enemy GUNDAM's beam rifle).")]
+        public bool loopSound = true;
+        LoopingFireSound _fireLoop;
+        AudioSource _oneShot;
+        static Transform s_listenerHead;
+
+        [Tooltip("Gun put away (MeleeWeaponAI drew its melee weapon): hidden, never aims or fires.")]
+        public bool holstered;
         [Tooltip("Aim this high above the target's root (m) - chest.")]
         public float aimHeight = 11f;
         public float engageRange = 260f;
@@ -113,6 +133,16 @@ namespace Gundam.Cockpit
 
         void Awake()
         {
+            if (fireSound != null && loopSound)
+            {
+                _fireLoop = new LoopingFireSound(gameObject, fireSound);
+            }
+            else if (fireSound != null)
+            {
+                _oneShot = gameObject.AddComponent<AudioSource>();
+                _oneShot.playOnAwake = false;
+                _oneShot.spatialBlend = 0f;
+            }
             _health = GetComponent<EnemyHealth>();
             if (ai == null) ai = GetComponent<ZakuCombatAI>();
             Ammo = magazine;
@@ -151,9 +181,11 @@ namespace Gundam.Cockpit
 
         void LateUpdate()
         {
+            if (_fireLoop != null) _fireLoop.Tick();
             if (!_init) return;
             float dt = Time.deltaTime;
             bool dead = _health != null && _health.IsDead;
+            if (dead && _fireLoop != null) _fireLoop.Stop();
 
             if (Reloading && Time.time >= _reloadEnd) { Reloading = false; Ammo = magazine; }
             // ZakuCombatAI re-poses the arms from rest every frame, but not the
@@ -164,7 +196,9 @@ namespace Gundam.Cockpit
             if (chestIsOwn) chest.localRotation = _chestRest;
 
             Vector3 aimPoint = target != null ? target.transform.position + Vector3.up * aimHeight : Vector3.zero;
-            bool engaged = !dead && target != null && !target.IsDown
+            if (gun != null && gun.gameObject.activeSelf == holstered) gun.gameObject.SetActive(!holstered);
+            if (holstered && _fireLoop != null) _fireLoop.Stop();
+            bool engaged = !dead && !holstered && target != null && !target.IsDown
                 && (ai == null || ai.CanSeeTarget)
                 && (aimPoint - upperArm.position).sqrMagnitude < engageRange * engageRange;
             _aim = Mathf.MoveTowards(_aim, engaged ? 1f : 0f, dt / Mathf.Max(0.05f, raiseTime));
@@ -221,7 +255,7 @@ namespace Gundam.Cockpit
             else _haveAim = false;
 
             // The gun always sits in the right fist, wherever the hand is.
-            if (gun != null)
+            if (gun != null && !holstered)
             {
                 Quaternion gunRot = hand.rotation * Quaternion.Inverse(gripFrame);
                 gun.rotation = gunRot;
@@ -255,6 +289,7 @@ namespace Gundam.Cockpit
 
             Vector3 dir = Quaternion.AngleAxis(Random.Range(0f, spread), Quaternion.AngleAxis(Random.Range(0f, 360f), to) * Vector3.Cross(to, Vector3.up).normalized) * to.normalized;
             SpawnBullet(muzzle, dir);
+            PlayShotSound(muzzle);
             _nextShot = Time.time + 60f / Mathf.Max(1f, roundsPerMinute);
 
             Ammo--;
@@ -268,6 +303,38 @@ namespace Gundam.Cockpit
             {
                 _burstLeft = Random.Range(burstRounds.x, burstRounds.y + 1);
                 _burstResume = Time.time + Random.Range(burstPause.x, burstPause.y);
+            }
+        }
+
+        /// <summary>The cockpit (and its AudioListener) sits far away from the
+        /// battlefield, so a normal 3D sound at the muzzle would never be heard:
+        /// this plays it 2D instead, with its volume falling off with the distance
+        /// to the pilot's Gundam and panned left/right by where the Zaku is relative
+        /// to where the pilot is looking (the Gundam's HeadCam).</summary>
+        void PlayShotSound(Vector3 muzzle)
+        {
+            if ((_fireLoop == null || !_fireLoop.Valid) && _oneShot == null) return;
+            if (s_listenerHead == null)
+            {
+                GameObject hc = GameObject.Find("HeadCam");
+                s_listenerHead = hc != null ? hc.transform : (target != null ? target.transform : null);
+            }
+            Transform ear = s_listenerHead;
+            if (ear == null) return;
+            Vector3 d = muzzle - ear.position;
+            float dist = d.magnitude;
+            if (dist > soundMaxRange) return;
+            float vol = fireVolume * Mathf.Clamp01(soundFullVolumeRange / Mathf.Max(dist, 1f));
+            vol *= 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(soundMaxRange * 0.6f, soundMaxRange, dist));
+            if (vol < 0.01f) return;
+            float pan = dist > 0.01f ? Mathf.Clamp(Vector3.Dot(d / dist, ear.right), -1f, 1f) * 0.8f : 0f;
+            // Keep the burst loop going until a little after this round's interval.
+            if (_fireLoop != null) _fireLoop.Trigger(vol, pan, 60f / Mathf.Max(1f, roundsPerMinute) * 1.6f);
+            else
+            {
+                _oneShot.panStereo = pan;
+                _oneShot.pitch = 1f + Random.Range(-firePitchJitter, firePitchJitter);
+                _oneShot.PlayOneShot(fireSound, vol);
             }
         }
 

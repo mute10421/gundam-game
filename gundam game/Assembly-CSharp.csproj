@@ -63,6 +63,7 @@
     <Compile Include="Assets\Scripts\Cockpit\VerticalTLever.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpawnSelectPanel.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ColonyStructure.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\MechSelectPanel.cs" />
     <Compile Include="Assets\Scripts\Cockpit\JoystickFingerButtons.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponAimFireController.cs" />
     <Compile Include="Assets\TutorialInfo\Readme.cs" />
@@ -76,33 +77,45 @@
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanBullet.cs" />
     <Compile Include="Assets\Scripts\Cockpit\BeamSaberArmController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitStatusHUD.cs" />
+    <Compile Include="Assets\RockingProjects\2DBoosterFlame\Scripts\BoosterFlameController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\VerticalThrustController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ZakuBullet.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUD.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\PilotMechSwitcher.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitWeaponHUD.cs" />
     <Compile Include="Assets\Scripts\Cockpit\PlayerHealth.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ColonyAtmosphere.cs" />
+    <Compile Include="Assets\RockingProjects\2DBoosterFlame\Scripts\Smooth.cs" />
+    <Compile Include="Assets\RockingProjects\2DBoosterFlame\Scripts\Helper.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyMarker.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponModeController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadVulcanController.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CockpitHUDManager.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandSubsystemBootDiagnostics.cs" />
+    <Compile Include="Assets\RockingProjects\2DBoosterFlame\Scripts\Velocity.cs" />
     <Compile Include="Assets\Scripts\Cockpit\CalibrationManager.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\GundamMoveSound.cs" />
     <Compile Include="Assets\Scripts\Cockpit\TargetingHUD.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\MechBoosterFlames.cs" />
     <Compile Include="Assets\Scripts\Cockpit\BeamRifleShot.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HitTarget.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HandExclusiveGrabAdapter.cs" />
     <Compile Include="Assets\Scripts\Cockpit\WeaponTouchPanel.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\CockpitTheme.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ZakuCombatAI.cs" />
     <Compile Include="Assets\Scripts\Cockpit\ZakuMachineGun.cs" />
     <Compile Include="Assets\Scripts\Cockpit\SpaceDustField.cs" />
     <Compile Include="Assets\Scripts\Cockpit\EnemyHealth.cs" />
     <Compile Include="Assets\Scripts\Cockpit\OrbitHUDTargetLock.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\LoopingFireSound.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\MeleeWeaponAI.cs" />
+    <Compile Include="Assets\Scripts\Cockpit\MechWalkAnimator.cs" />
     <Compile Include="Assets\Scripts\Cockpit\HeadCamManualLook.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Assets\TutorialInfo\StyleSheets\ReadmeEditor.uss" />
     <None Include="Assets\TutorialInfo\StyleSheets\ReadmeEditorLight.uss" />
+    <None Include="Assets\Shaders\HeadCamInsetCube.shader" />
     <None Include="Assets\Shaders\CockpitDomeCubemap.shader" />
     <None Include="Assets\TutorialInfo\StyleSheets\ReadmeEditorDark.uss" />
   </ItemGroup>

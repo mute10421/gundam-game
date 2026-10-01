@@ -46,6 +46,8 @@ namespace Gundam.Cockpit
         public ColonyStructure colony;
         [Tooltip("The panel waits for calibration to finish first (optional).")]
         public CalibrationManager calibration;
+        [Tooltip("...and for the mobile suit to be chosen (GUNDAM / ZAKU), if that panel exists.")]
+        public MechSelectPanel mechSelect;
         [Tooltip("Paused (enabled = false) until a point is chosen.")]
         public Behaviour[] pauseUntilChosen;
         public HandJointTracker leftHand;
@@ -150,6 +152,7 @@ namespace Gundam.Cockpit
             if (!_shown)
             {
                 if (calibration != null && !calibration.IsCalibrationComplete) return;
+                if (mechSelect != null && !mechSelect.Chosen) return;
                 _shown = true;
                 if (panelRoot != null) panelRoot.SetActive(true);
                 SetPaused(true);

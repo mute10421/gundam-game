@@ -107,6 +107,15 @@ namespace Gundam.Cockpit
         bool _haveCameraStart;
         Material _domeMat;
 
+        /// <summary>HeadCam was moved to another mobile suit's head (GUNDAM / ZAKU
+        /// selection): its current local rotation becomes the new rest.</summary>
+        public void RecaptureCameraStart()
+        {
+            if (viewCamera == null) return;
+            _cameraStartLocalRotation = viewCamera.transform.localRotation;
+            _haveCameraStart = true;
+        }
+
         void Start()
         {
             if (viewCamera != null)

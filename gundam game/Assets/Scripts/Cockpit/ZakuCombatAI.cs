@@ -80,6 +80,12 @@ namespace Gundam.Cockpit
         /// <summary>The distance the Zaku is currently trying to fight at.</summary>
         public float CurrentPreferredDistance { get; private set; }
 
+        [Header("Melee (set by MeleeWeaponAI)")]
+        [Tooltip("> 0: fight at this distance instead (melee weapon drawn - closes in).")]
+        public float rangeOverride = -1f;
+        [Tooltip("> 0: may come this close instead of minDistance.")]
+        public float minDistanceOverride = -1f;
+
         [Header("Maneuvering")]
         public float strafeSpeed = 9f;
         public float approachSpeed = 11f;
@@ -143,6 +149,12 @@ namespace Gundam.Cockpit
 
         [Header("Procedural walk")]
         public bool animateBody = true;
+        [Tooltip("Per \"자쿠랑 건담 둘다 우주로 나가면 걷는거를 하면안됨\": with no colony floor under it (open space) the suit doesn't walk - it floats, legs trailing, leaning into its flight.")]
+        public bool floatInSpace = true;
+        [Tooltip("Lean (deg) into the flight direction at full speed while floating.")]
+        public float floatLeanDegrees = 14f;
+        [Tooltip("Knee bend (deg) of the relaxed floating pose.")]
+        public float floatKneeDegrees = 22f;
         [Tooltip("Metres covered per step.")]
         public float strideLength = 7f;
         public float legSwingDegrees = 28f;
@@ -308,11 +320,13 @@ namespace Gundam.Cockpit
             Vector3 radial = dist > 0.01f ? toTarget / dist : transform.forward;
             Vector3 tangent = Vector3.Cross(Vector3.up, radial); // Zaku's own right when facing the target
 
-            float wanted = Mathf.Max(minDistance, varyDistance ? CurrentPreferredDistance : preferredDistance);
+            float minD = minDistanceOverride > 0f ? minDistanceOverride : minDistance;
+            bool closing = rangeOverride > 0f;
+            float wanted = Mathf.Max(minD, closing ? rangeOverride : (varyDistance ? CurrentPreferredDistance : preferredDistance));
             // Smooth (not linear-clamped) approach: eases off as it nears the wanted range.
             float err = (dist - wanted) / Mathf.Max(0.1f, distanceTolerance);
-            float approach = (float)System.Math.Tanh(err) * approachSpeed * _approachMul;
-            if (dist < minDistance) approach = -approachSpeed * 1.5f; // too close - back off hard
+            float approach = (float)System.Math.Tanh(err) * approachSpeed * (closing ? chargeSpeedMultiplier : _approachMul);
+            if (dist < minD) approach = -approachSpeed * 1.5f; // too close - back off hard
 
             // Sidestep: eases through a stop when reversing.
             float strafeTarget = _strafeDir * _speedMul;
@@ -509,6 +523,12 @@ namespace Gundam.Cockpit
             Vector3 swingAxis = Vector3.Cross(Vector3.up, moveDir).normalized;
             Vector3 bodyRight = transform.right;
 
+            if (floatInSpace && arena == null)
+            {
+                FloatPose(dt, amount, swingAxis, bodyRight);
+                return;
+            }
+
             float s = Mathf.Sin(_phase);
             float c = Mathf.Cos(_phase);
             float leg = legSwingDegrees * amount * s;
@@ -555,6 +575,43 @@ namespace Gundam.Cockpit
                         float a = Mathf.Clamp(Vector3.SignedAngle(fwd, to, Vector3.up) + _lead * torsoCounterTwist, -headTrackDegrees, headTrackDegrees);
                         Rotate(_head, a, Vector3.up); // what the spine's counter-twist left over
                     }
+                }
+            }
+        }
+
+        /// <summary>Open space: no steps - legs relaxed and trailing behind the flight,
+        /// the body leaning into it, a slow drifting bob; the head still tracks.</summary>
+        void FloatPose(float dt, float amount, Vector3 swingAxis, Vector3 bodyRight)
+        {
+            float t = Time.time + _seed;
+            float drift = Mathf.Sin(t * 0.9f);
+            // Legs: knees softly bent, swept back with speed, a slight scissor drift.
+            float trail = floatLeanDegrees * 1.4f * amount;
+            Rotate(_lUpLeg, trail + 4f + drift * 3f, swingAxis);
+            Rotate(_rUpLeg, trail - 2f - drift * 3f, swingAxis);
+            Rotate(_lLeg, floatKneeDegrees + 6f * amount, bodyRight);
+            Rotate(_rLeg, floatKneeDegrees * 1.3f + 6f * amount, bodyRight);
+            // Arms loose.
+            float elbow = elbowBendDegrees * 1.2f;
+            Rotate(_lForeArm, -elbow, bodyRight);
+            Rotate(_rForeArm, -elbow, bodyRight);
+            // Body leans into the flight; counter-twist toward the target as when walking.
+            Rotate(_spine, floatLeanDegrees * amount + Mathf.Sin(t * 0.6f) * 1.5f, swingAxis);
+            Rotate(_spine, -_lead * torsoCounterTwist, Vector3.up);
+            Rotate(_spine, -hitFlinchDegrees * _flinch, bodyRight);
+            if (_hips != null && _hips.parent != null)
+                _hips.localPosition = _hipsRestLocalPos + _hips.parent.InverseTransformVector(Vector3.up * (drift * 0.25f));
+            if (_head != null)
+            {
+                _head.localRotation = _headRest;
+                if (target != null && (CanSeeTarget || HasLastKnown))
+                {
+                    Vector3 to = (CanSeeTarget ? target.position : LastKnownPosition) - _head.position;
+                    to.y = 0f;
+                    Vector3 fwd = transform.forward;
+                    fwd.y = 0f;
+                    if (to.sqrMagnitude > 0.01f && fwd.sqrMagnitude > 0.01f)
+                        Rotate(_head, Mathf.Clamp(Vector3.SignedAngle(fwd, to, Vector3.up) + _lead * torsoCounterTwist, -headTrackDegrees, headTrackDegrees), Vector3.up);
                 }
             }
         }

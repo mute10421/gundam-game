@@ -46,7 +46,9 @@ namespace Gundam.EditorTools
         // own Gundam rather than needing its own separately-tuned number.
         const float MobileSuitTargetHeight = 18f;
         // ZakuEnemy's starting Z (ExternalGundam stands at Z=20 -> 80m apart).
-        const float ShipTopSpeed = 40f; // m/s at full LeftJoystick push (was 8)
+        // m/s at full LeftJoystick push (8 -> 40 -> 55, per "건담에 속도를 조금 더 빠르게":
+        // 144 -> ~198 km/h; the HUD shows km/h).
+        const float ShipTopSpeed = 55f;
         const float ZakuSpawnZ = 100f;
 
         // An unnamed layer index used ONLY to hide ExternalGundam's own body
@@ -109,6 +111,14 @@ namespace Gundam.EditorTools
             // scales speed linearly with how far LeftJoystick is pushed (after its
             // dead zone), so a light push is still slow and a full push is 40 m/s.
             ship.maxMoveSpeed = ShipTopSpeed;
+
+            // Wind sound while the Gundam moves (per "건담으로 움직일때 이소리가 나오게해줘") -
+            // measures MobileSuitRoot's actual motion; the movement scripts are untouched.
+            GundamMoveSound moveSound = suitRoot.AddComponent<GundamMoveSound>();
+            moveSound.target = suitRoot.transform;
+            moveSound.fullSpeed = ShipTopSpeed;
+            moveSound.windSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_Move_Wind.wav");
+            if (moveSound.windSound == null) Debug.LogWarning("[Gundam] Move sound 'Assets/Audio/Gundam_Move_Wind.wav' not found - moving is silent.");
 
             // Shared vitals data for the 3-display Cockpit HUD (FrontDisplay's
             // status badge + LeftDisplay's gauges both read the same
@@ -510,6 +520,9 @@ namespace Gundam.EditorTools
                     Camera vulcanPlayerCamera = xrOrigin.GetComponentInChildren<Camera>(true);
 
                     HeadVulcanController headVulcan = suitRoot.AddComponent<HeadVulcanController>();
+                    // Firing sound (per "아까한거는 건담 해드 발칸 소리로 하자").
+                    headVulcan.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_HeadVulcan_FireLoop.wav");
+                    if (headVulcan.fireSound == null) Debug.LogWarning("[Gundam] Head vulcan sound 'Assets/Audio/Gundam_HeadVulcan_FireLoop.wav' not found - the vulcan fires silently.");
                     headVulcan.mainCamera = vulcanPlayerCamera;
                     headVulcan.muzzleLeft = muzzleL.transform;
                     headVulcan.muzzleRight = muzzleR.transform;
@@ -681,6 +694,12 @@ namespace Gundam.EditorTools
             //     right arm + saber). See SetupBeamSaberMode. ---
             SetupBeamSaberMode(suitRoot, interior, gundamResult, rightStick, leftHand, rightHand, xrOrigin);
 
+            // --- PLAYABLE ZAKU + MOBILE SUIT selection at game start (per "자쿠를
+            //     플레이할수있게해줘야해 게임을 시작하고 자쿠로 할지 건담으로 할지 고르게").
+            //     See SetupZakuMode / PilotMechSwitcher. ---
+            SetupZakuMode(suitRoot, interior, xrOrigin, rightStick, leftHand, rightHand, hudManager, colony,
+                gundamResult, calibManager, new Behaviour[] { ship, verticalThrust });
+
             // --- Shrink the 3-display cluster to half size and lift it above the
             //     hands on the sticks - per "앞에 디스플레이를 더 작게 ... 조종기랑
             //     너무 겹쳐서 누를수가 없어" (option: 절반 크기 + 조종기 위로).
@@ -698,6 +717,10 @@ namespace Gundam.EditorTools
             // is Default only), so moving them to CockpitInteriorLayer made the
             // sticks ungrabbable. The XR rig's own settings are left untouched.
             SetLayerRecursivelyExceptColliders(interior, CockpitInteriorLayer);
+
+            // --- OPTIMIZATION (per "랙이 조금 거림 화질은 별로 차이 없고 최적화좀해줘"). ---
+            OptimizeHeavySceneMeshes();
+            WireHeadCamInsetToCubemap();
 
             // --- COCKPIT STATION - per "콕핏이 건담을 따라다니니까 콕핏에서 자꾸 밖에
             //     사물이 들어와서 시야를 가려 콕핏을 졸라 멀리 배치해 건담을 안따라
@@ -735,6 +758,322 @@ namespace Gundam.EditorTools
             Selection.activeGameObject = suitRoot;
             Debug.Log("[Gundam] Cockpit prototype scene (visual overhaul) built and saved at " + ScenePath +
                        ". Open Project Settings > XR Plug-in Management to enable OpenXR + Hand Tracking if you haven't yet.");
+        }
+
+        // ---------------------------------------------------------------
+        // OPTIMIZATION - per "랙이 조금 거림 화질은 별로 차이 없고 최적화좀해줘".
+        // The frame cost was dominated by a few imported models that are far
+        // denser than anything else in the scene: every Zaku is 500k triangles
+        // (383k skinned vertices) and so is its machine gun - with 10 Zakus that
+        // is 10 million triangles, drawn again for every cube face / view that
+        // sees them, plus 3.8M vertices skinned every frame. The beam rifle and
+        // saber hilt are 500k triangles each too. The colony itself is ~1M.
+        //
+        // Each such model gets a reduced copy (Unity's own Mesh LOD simplifier,
+        // MeshLodUtility - it only drops triangles and keeps the original
+        // vertices, so UVs, normals, bone weights and bind poses stay exact and
+        // the SkinnedMeshRenderer's bones / animation keep working unchanged),
+        // compacted to just the vertices still used. Saved once under
+        // Assets/Models/Optimized and reused by later rebuilds. The FBX files
+        // themselves are not touched.
+        // ---------------------------------------------------------------
+        const string OptimizedMeshFolder = "Assets/Models/Optimized";
+        const int HeavyMeshVertexThreshold = 100000;
+
+        // Chosen from side-by-side renders of each simplifier level: the Zaku at
+        // ~135k triangles and the weapons at ~50-85k look the same as the 500k
+        // originals; one level lower the surfaces start to go lumpy.
+        static int OptimizedTriangleTarget(string fbxPath, bool skinned)
+        {
+            if (fbxPath.IndexOf("ZakuMachineGun", StringComparison.OrdinalIgnoreCase) >= 0) return 50000;
+            if (fbxPath.IndexOf("HeatHawk", StringComparison.OrdinalIgnoreCase) >= 0) return 40000;
+            if (fbxPath.IndexOf("ZakuBazooka", StringComparison.OrdinalIgnoreCase) >= 0) return 50000;
+            // Gundam: its ~140.7k level is just over 140k - the next level down (76k) goes lumpy.
+            if (skinned && fbxPath.IndexOf("Gundam", StringComparison.OrdinalIgnoreCase) >= 0) return 145000;
+            return skinned ? 140000 : 85000;
+        }
+
+        static void OptimizeHeavySceneMeshes()
+        {
+            var cache = new System.Collections.Generic.Dictionary<Mesh, Mesh>();
+            int swapped = 0;
+            long trisBefore = 0, trisAfter = 0;
+            foreach (Renderer r in UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            {
+                if (r.gameObject.layer == GundamBodyLayer) continue; // never drawn by any camera
+                SkinnedMeshRenderer smr = r as SkinnedMeshRenderer;
+                MeshFilter mf = smr == null ? r.GetComponent<MeshFilter>() : null;
+                Mesh src = smr != null ? smr.sharedMesh : (mf != null ? mf.sharedMesh : null);
+                if (src == null || src.vertexCount < HeavyMeshVertexThreshold) continue;
+                string path = AssetDatabase.GetAssetPath(src);
+                if (string.IsNullOrEmpty(path) || !path.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (!cache.TryGetValue(src, out Mesh reduced))
+                {
+                    reduced = GetOrCreateReducedMesh(src, path, OptimizedTriangleTarget(path, smr != null));
+                    cache[src] = reduced;
+                    if (reduced != null)
+                        Debug.Log("[Gundam] Optimized mesh '" + path + "': " + TriangleCount(src) + " -> " + TriangleCount(reduced, 0) +
+                            " triangles, " + src.vertexCount + " -> " + reduced.vertexCount + " vertices.");
+                }
+                if (reduced == null) continue;
+                trisBefore += TriangleCount(src);
+                trisAfter += TriangleCount(reduced, 0);
+                if (smr != null) smr.sharedMesh = reduced; else mf.sharedMesh = reduced;
+                swapped++;
+            }
+            Debug.Log("[Gundam] Heavy-mesh optimization: " + swapped + " renderers now use reduced meshes (" +
+                trisBefore + " -> " + trisAfter + " triangles in total at full detail).");
+        }
+
+        /// <summary>Creates (or reuses) the reduced meshes for the known heavy models
+        /// without touching any scene - the scene build swaps them in afterwards.</summary>
+        public static void PrebuildOptimizedMeshes()
+        {
+            foreach (string path in new[] { ZakuModelPath, ZakuGunModelPath, BeamRifleModelPath, BeamSaberHiltPath, HeatHawkModelPath, ZakuBazookaModelPath, GundamModelPath })
+            {
+                foreach (Mesh src in AssetDatabase.LoadAllAssetsAtPath(path).OfType<Mesh>())
+                {
+                    if (src.vertexCount < HeavyMeshVertexThreshold) continue;
+                    Mesh reduced = GetOrCreateReducedMesh(src, path, OptimizedTriangleTarget(path, src.bindposeCount > 0));
+                    Debug.Log("[Gundam] " + path + " [" + src.name + "]: " + TriangleCount(src) + " -> " +
+                        (reduced != null ? TriangleCount(reduced, 0) + " triangles, " + reduced.vertexCount + " vertices, " + reduced.lodCount + " runtime LODs" : "FAILED"));
+                }
+            }
+        }
+
+        static long TriangleCount(Mesh m, int lod = -1)
+        {
+            long t = 0;
+            for (int s = 0; s < m.subMeshCount; s++)
+                t += (lod >= 0 && m.lodCount > 1 ? m.GetLod(s, lod).indexCount : m.GetSubMesh(s).indexCount) / 3;
+            return t;
+        }
+
+        static Mesh GetOrCreateReducedMesh(Mesh src, string fbxPath, int targetTris)
+        {
+            string safe = System.Text.RegularExpressions.Regex.Replace(
+                System.IO.Path.GetFileNameWithoutExtension(fbxPath) + "__" + src.name, "[^A-Za-z0-9_\\-]", "_");
+            if (safe.Length > 80) safe = safe.Substring(0, 80);
+            string assetPath = OptimizedMeshFolder + "/" + safe + "__" + targetTris + ".asset";
+            Mesh existing = AssetDatabase.LoadAssetAtPath<Mesh>(assetPath);
+            if (existing != null && existing.lodCount <= 1) return existing;
+
+            Mesh reduced = BuildReducedMesh(src, targetTris);
+            if (reduced == null) return existing;
+            if (existing != null)
+            {
+                // Older version of this asset (built with runtime LODs): overwrite
+                // it in place so its GUID - and any scene reference - is kept.
+                EditorUtility.CopySerialized(reduced, existing);
+                UnityEngine.Object.DestroyImmediate(reduced);
+                reduced = existing;
+                reduced.name = System.IO.Path.GetFileNameWithoutExtension(assetPath);
+                EditorUtility.SetDirty(reduced);
+            }
+            else
+            {
+                System.IO.Directory.CreateDirectory(OptimizedMeshFolder);
+                AssetDatabase.CreateAsset(reduced, assetPath);
+            }
+            // Not Read/Write: no CPU copy kept in the build (nothing reads these meshes).
+            SerializedObject so = new SerializedObject(reduced);
+            SerializedProperty readable = so.FindProperty("m_IsReadable");
+            if (readable != null) { readable.boolValue = false; so.ApplyModifiedPropertiesWithoutUndo(); }
+            AssetDatabase.SaveAssets();
+            return reduced;
+        }
+
+        /// <summary>Picks the first generated Mesh LOD level at or under targetTris,
+        /// copies just that level's triangles and the vertices they use (all
+        /// attributes, bone weights, bind poses, blend shapes), then gives the
+        /// result its own runtime Mesh LODs.</summary>
+        static Mesh BuildReducedMesh(Mesh src, int targetTris)
+        {
+            Mesh work = UnityEngine.Object.Instantiate(src);
+            try
+            {
+                MeshLodUtility.GenerateMeshLods(work);
+                if (work.lodCount <= 1) return null;
+                int level = work.lodCount - 1;
+                for (int l = 1; l < work.lodCount; l++)
+                {
+                    if (TriangleCount(work, l) <= targetTris) { level = l; break; }
+                }
+
+                int subCount = work.subMeshCount;
+                int[][] subIdx = new int[subCount][];
+                using (Mesh.MeshDataArray data = Mesh.AcquireReadOnlyMeshData(work))
+                {
+                    Mesh.MeshData md = data[0];
+                    bool u32 = md.indexFormat == UnityEngine.Rendering.IndexFormat.UInt32;
+                    Unity.Collections.NativeArray<uint> i32 = u32 ? md.GetIndexData<uint>() : default;
+                    Unity.Collections.NativeArray<ushort> i16 = u32 ? default : md.GetIndexData<ushort>();
+                    for (int s = 0; s < subCount; s++)
+                    {
+                        UnityEngine.Rendering.SubMeshDescriptor desc = work.GetSubMesh(s);
+                        MeshLodRange range = work.GetLod(s, level);
+                        int start = (int)range.indexStart;
+                        bool absolute = start >= desc.indexStart && start + range.indexCount <= desc.indexStart + desc.indexCount;
+                        if (!absolute) start += desc.indexStart;
+                        int[] idx = new int[range.indexCount];
+                        for (int k = 0; k < idx.Length; k++)
+                            idx[k] = (u32 ? (int)i32[start + k] : i16[start + k]) + desc.baseVertex;
+                        subIdx[s] = idx;
+                    }
+                }
+
+                int vCount = src.vertexCount;
+                int[] map = new int[vCount];
+                for (int i = 0; i < vCount; i++) map[i] = -1;
+                var order = new System.Collections.Generic.List<int>(vCount / 4);
+                for (int s = 0; s < subCount; s++)
+                {
+                    int[] idx = subIdx[s];
+                    for (int k = 0; k < idx.Length; k++)
+                    {
+                        int v = idx[k];
+                        if (map[v] < 0) { map[v] = order.Count; order.Add(v); }
+                        idx[k] = map[v];
+                    }
+                }
+                int n = order.Count;
+
+                Mesh m = new Mesh();
+                m.name = src.name + "_Optimized";
+                m.indexFormat = n > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+
+                var v3 = new System.Collections.Generic.List<Vector3>();
+                src.GetVertices(v3);
+                m.SetVertices(order.Select(i => v3[i]).ToList());
+                if (src.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Normal))
+                {
+                    src.GetNormals(v3);
+                    m.SetNormals(order.Select(i => v3[i]).ToList());
+                }
+                if (src.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Tangent))
+                {
+                    var t4 = new System.Collections.Generic.List<Vector4>();
+                    src.GetTangents(t4);
+                    m.SetTangents(order.Select(i => t4[i]).ToList());
+                }
+                if (src.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.Color))
+                {
+                    var c = new System.Collections.Generic.List<Color32>();
+                    src.GetColors(c);
+                    m.SetColors(order.Select(i => c[i]).ToList());
+                }
+                for (int ch = 0; ch < 8; ch++)
+                {
+                    var attr = (UnityEngine.Rendering.VertexAttribute)((int)UnityEngine.Rendering.VertexAttribute.TexCoord0 + ch);
+                    if (!src.HasVertexAttribute(attr)) continue;
+                    int dim = src.GetVertexAttributeDimension(attr);
+                    if (dim <= 2)
+                    {
+                        var uv = new System.Collections.Generic.List<Vector2>();
+                        src.GetUVs(ch, uv);
+                        m.SetUVs(ch, order.Select(i => uv[i]).ToList());
+                    }
+                    else if (dim == 3)
+                    {
+                        var uv = new System.Collections.Generic.List<Vector3>();
+                        src.GetUVs(ch, uv);
+                        m.SetUVs(ch, order.Select(i => uv[i]).ToList());
+                    }
+                    else
+                    {
+                        var uv = new System.Collections.Generic.List<Vector4>();
+                        src.GetUVs(ch, uv);
+                        m.SetUVs(ch, order.Select(i => uv[i]).ToList());
+                    }
+                }
+
+                // Skinning: bone weights (any count per vertex) + bind poses, same bone order.
+                Unity.Collections.NativeArray<byte> bpv = src.GetBonesPerVertex();
+                if (bpv.Length == vCount)
+                {
+                    Unity.Collections.NativeArray<BoneWeight1> all = src.GetAllBoneWeights();
+                    int[] offset = new int[vCount];
+                    int acc = 0;
+                    for (int i = 0; i < vCount; i++) { offset[i] = acc; acc += bpv[i]; }
+                    var outBpv = new Unity.Collections.NativeArray<byte>(n, Unity.Collections.Allocator.Temp);
+                    var outW = new System.Collections.Generic.List<BoneWeight1>(n * 4);
+                    for (int j = 0; j < n; j++)
+                    {
+                        int i = order[j];
+                        outBpv[j] = bpv[i];
+                        for (int k = 0; k < bpv[i]; k++) outW.Add(all[offset[i] + k]);
+                    }
+                    var outWArr = new Unity.Collections.NativeArray<BoneWeight1>(outW.ToArray(), Unity.Collections.Allocator.Temp);
+                    m.SetBoneWeights(outBpv, outWArr);
+                    outBpv.Dispose();
+                    outWArr.Dispose();
+                }
+                m.bindposes = src.bindposes;
+
+                if (src.blendShapeCount > 0)
+                {
+                    Vector3[] dv = new Vector3[vCount], dn = new Vector3[vCount], dt = new Vector3[vCount];
+                    Vector3[] ov = new Vector3[n], on = new Vector3[n], ot = new Vector3[n];
+                    for (int b = 0; b < src.blendShapeCount; b++)
+                    {
+                        for (int f = 0; f < src.GetBlendShapeFrameCount(b); f++)
+                        {
+                            src.GetBlendShapeFrameVertices(b, f, dv, dn, dt);
+                            for (int j = 0; j < n; j++) { ov[j] = dv[order[j]]; on[j] = dn[order[j]]; ot[j] = dt[order[j]]; }
+                            m.AddBlendShapeFrame(src.GetBlendShapeName(b), src.GetBlendShapeFrameWeight(b, f), ov, on, ot);
+                        }
+                    }
+                }
+
+                m.subMeshCount = subCount;
+                for (int s = 0; s < subCount; s++)
+                    m.SetIndices(subIdx[s], MeshTopology.Triangles, s, false);
+                m.bounds = src.bounds;
+                // No runtime Mesh LODs on top: tested, Unity's automatic selection
+                // switched to the lumpy lower levels already at mid range.
+                return m;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Gundam] Could not optimize mesh '" + src.name + "' (" + e.Message + ") - keeping the original.");
+                return null;
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(work);
+            }
+        }
+
+        /// <summary>Points the center display's HEAD CAM inset at the live cubemap
+        /// (Custom/HeadCamInsetCube) so HeadCam no longer renders the whole scene a
+        /// second time just for that small picture - GundamHeadCam360 feeds it the
+        /// camera's rotation/FOV each frame and switches the flat render off.</summary>
+        static void WireHeadCamInsetToCubemap()
+        {
+            GundamHeadCam360 cam360 = UnityEngine.Object.FindFirstObjectByType<GundamHeadCam360>();
+            Shader shader = Shader.Find("Custom/HeadCamInsetCube");
+            if (cam360 == null || shader == null || cam360.cubemap == null)
+            {
+                Debug.LogWarning("[Gundam] HEAD CAM inset stays on the flat render (missing GundamHeadCam360, cubemap or the Custom/HeadCamInsetCube shader).");
+                return;
+            }
+            RawImage feed = null;
+            foreach (RawImage ri in UnityEngine.Object.FindObjectsByType<RawImage>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+            {
+                if (ri.name == "Feed" && ri.transform.parent != null && ri.transform.parent.name == "HeadCamInset") { feed = ri; break; }
+            }
+            if (feed == null)
+            {
+                Debug.LogWarning("[Gundam] HEAD CAM inset 'HeadCamInset/Feed' not found - it stays on the flat render.");
+                return;
+            }
+            Material m = new Material(shader);
+            m.name = "HeadCamInset_Cube";
+            m.SetTexture("_CubeTex", cam360.cubemap);
+            feed.material = m;
+            cam360.insetImage = feed;
+            Debug.Log("[Gundam] HEAD CAM inset now samples the live cubemap - HeadCam's extra flat full-scene render is switched off at runtime.");
         }
 
         // Fixed spot for the cockpit (see COCKPIT STATION above): ~9 km from the
@@ -780,7 +1119,9 @@ namespace Gundam.EditorTools
         // more resolution - 512 is a reasonable middle ground for a mobile XR
         // headset (6 faces re-rendered every frame isn't free); tell me if it
         // still isn't sharp enough or if it costs too much frame rate.
-        const int HeadCam360CubemapResolution = 2048; // per "화질이 너무 않좋아" (was 512)
+        // 512 -> 2048 (per "화질이 너무 않좋아") -> 1536: per "랙이 조금 거림 화질은 별로 차이 없고
+        // 최적화좀해줘" - 2048 cost ~1.8x the pixels of 1536 for no visible gain.
+        const int HeadCam360CubemapResolution = 1536;
 
         // ---------------------------------------------------------------
         // External Gundam model — instantiates the imported FBX (see
@@ -1021,6 +1362,19 @@ namespace Gundam.EditorTools
             // Far enough for the distant wreckage (up to ~900m), far stars and the
             // whole space colony (6.4 km across, far end 13.5 km away at the start).
             headCam.farClipPlane = Mathf.Max(headCam.farClipPlane, 16000f);
+            // Optimization (per "랙이 조금 거림 ... 최적화좀해줘"): HeadCam renders up to
+            // six cube faces a frame, so skip everything it doesn't need - no depth /
+            // opaque texture copies, no shadow pass, no post, no HDR buffer.
+            headCam.allowHDR = false;
+            var headCamData = UnityEngine.Rendering.Universal.CameraExtensions.GetUniversalAdditionalCameraData(headCam);
+            if (headCamData != null)
+            {
+                headCamData.requiresDepthOption = UnityEngine.Rendering.Universal.CameraOverrideOption.Off;
+                headCamData.requiresColorOption = UnityEngine.Rendering.Universal.CameraOverrideOption.Off;
+                headCamData.renderShadows = false;
+                headCamData.renderPostProcessing = false;
+                headCamData.antialiasing = UnityEngine.Rendering.Universal.AntialiasingMode.None;
+            }
 
             Debug.Log("[Gundam] Head camera attached to the '" + head.name + "' bone, feeding RenderTexture at " +
                 HeadCamRenderTexturePath + ".");
@@ -1204,12 +1558,17 @@ namespace Gundam.EditorTools
                 new Vector2(0, -138), WeaponModeController.Mode.BeamRifle, btnSize, 22);
             WeaponTouchPanel.TouchButton saberBtn = BuildTouchButton(weaponCanvas, "Btn_BeamSaber", "BEAM\nSABER",
                 new Vector2(126, -138), WeaponModeController.Mode.BeamSaber, btnSize, 22);
+            // ZAKU only (per "자쿠 바주카"): hidden while flying the GUNDAM
+            // (WeaponTouchPanel.ApplyMechLayout), so the GUNDAM keeps the 3 buttons above.
+            WeaponTouchPanel.TouchButton bazookaBtn = BuildTouchButton(weaponCanvas, "Btn_Bazooka", "BAZOOKA",
+                new Vector2(252, -138), WeaponModeController.Mode.Bazooka, btnSize, 22);
+            bazookaBtn.rect.gameObject.SetActive(false);
 
             WeaponTouchPanel panel = weaponCanvas.gameObject.AddComponent<WeaponTouchPanel>();
             panel.weapons = modes;
             panel.leftHand = leftHand;
             panel.rightHand = rightHand;
-            panel.buttons = new[] { vulcanBtn, rifleBtn, saberBtn };
+            panel.buttons = new[] { vulcanBtn, rifleBtn, saberBtn, bazookaBtn };
             panel.currentText = current;
         }
 
@@ -1521,6 +1880,9 @@ namespace Gundam.EditorTools
             // Hits: 200 damage per contact (per "빔샤벨은 데미지 일단은 200") - see BeamSaberBlade.
             BeamSaberBlade hits = root.AddComponent<BeamSaberBlade>();
             hits.damage = 200;
+            // Swing sound, only while the blade is actually swung (per "빔샤벨을 휘두를때만 나오게해줘").
+            hits.swingSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamSaber_Swing.wav");
+            if (hits.swingSound == null) Debug.LogWarning("[Gundam] Beam saber sound 'Assets/Audio/Gundam_BeamSaber_Swing.wav' not found - swings are silent.");
             hits.bladeStart = hiltLen * 0.5f;
             hits.bladeLength = BeamSaberBladeLength;
             hits.hitRadius = BeamSaberBladeRadius + 0.3f;
@@ -1643,6 +2005,9 @@ namespace Gundam.EditorTools
             rc.rightUpperArm = rUpper; rc.rightForeArm = rFore; rc.rightHand = rHand;
             rc.leftUpperArm = lUpper; rc.leftForeArm = lFore; rc.leftHand = lHand;
             rc.rifle = rifle;
+            // Firing sound (per "방금다운로드한 사운드를 빔라이플이 나갈때 나오게 해줘").
+            rc.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamRifle_Fire.wav");
+            if (rc.fireSound == null) Debug.LogWarning("[Gundam] Beam rifle sound 'Assets/Audio/Gundam_BeamRifle_Fire.wav' not found - the rifle fires silently.");
             rc.rightArmView = rightView;
             rc.leftArmView = leftView;
 
@@ -3433,10 +3798,80 @@ namespace Gundam.EditorTools
             // Machine gun in the right hand (per "자쿠의 머신건 ... 자쿠손에 들려주고
             // 사격을 하게 해줘").
             AddZakuMachineGun(instance, playerGundam);
+            // ...and the heat hawk - the AI picks which one to fight with.
+            AddZakuHeatHawk(instance, playerGundam);
+            // Booster flames: backpack always, soles only in space.
+            AddBoosterFlames(instance, false, colony);
 
             Debug.Log("[Gundam] Placed " + zakuName + " at " + instance.transform.position +
                 " (facing the player's Gundam)" +
                 (zakuTexture != null ? ", base color texture applied." : ", no texture found (flat default material)."));
+        }
+
+        // ---------------------------------------------------------------
+        // BOOSTER FLAMES - per "유니티 엣셋에 부스터 다운했거든 자쿠랑 건담 등뒤에
+        // 부스터에서 효과가 나와야하고 발바닥에서도 나와야하는데 발바닥은 우주에서만"
+        // (enemy suits only - the pilot's own body is hidden). The Asset Store
+        // package "2D Booster Flame Shader Controller" (RockingProjects) - only its
+        // shader, materials, textures and scripts were brought in (not its demo
+        // scene / render pipeline asset / package manifest). MechBoosterFlames draws
+        // the flame on crossed planes at each nozzle:
+        //   back  - the backpack nozzles, always (bigger with speed)
+        //   soles - only in space (outside the colony)
+        // Nozzle points: suit-local metres (18 m suit, feet at y 0, facing +Z),
+        // measured from orthographic back / side / bottom renders of each model.
+        // ---------------------------------------------------------------
+        const string BoosterFlameMaterialPath = "Assets/RockingProjects/2DBoosterFlame/Material/BoosterFlameMaterialBlue.mat";
+        static readonly Vector3[] GundamBackNozzles = { new Vector3(-0.78f, 12.25f, -2.04f), new Vector3(0.78f, 12.25f, -2.04f) };
+        static readonly Vector3 GundamBackExhaust = new Vector3(0f, -1f, -0.3f);   // down, a little back
+        static readonly Vector3[] ZakuBackNozzles = { new Vector3(-0.83f, 13.10f, -2.36f), new Vector3(0.57f, 13.10f, -2.36f) };
+        static readonly Vector3 ZakuBackExhaust = new Vector3(0f, -0.7f, -0.7f);   // back and down
+
+        static void AddBoosterFlames(GameObject suit, bool gundam, ColonyStructure colony)
+        {
+            Material mat = AssetDatabase.LoadAssetAtPath<Material>(BoosterFlameMaterialPath);
+            if (mat == null)
+            {
+                Debug.LogWarning("[Gundam] Booster flame material not found at " + BoosterFlameMaterialPath + " - no booster flames on " + suit.name + ".");
+                return;
+            }
+            Transform t = suit.transform;
+            Transform chest = FindDeepChild(t, "Spine2") ?? FindDeepChild(t, "Spine1") ?? t;
+            var back = new System.Collections.Generic.List<Transform>();
+            Vector3[] pts = gundam ? GundamBackNozzles : ZakuBackNozzles;
+            Vector3 exhaust = (gundam ? GundamBackExhaust : ZakuBackExhaust).normalized;
+            for (int i = 0; i < pts.Length; i++)
+                back.Add(MakeNozzle("BoosterNozzle_Back" + i, chest, t.position + t.rotation * pts[i], t.rotation * exhaust, t.up));
+
+            var feet = new System.Collections.Generic.List<Transform>();
+            foreach (string side in new[] { "Left", "Right" })
+            {
+                Transform foot = FindDeepChild(t, side + "Foot");
+                Transform toe = FindDeepChild(t, side + "ToeBase");
+                if (foot == null) continue;
+                Vector3 sole = toe != null ? Vector3.Lerp(foot.position, toe.position, 0.4f) : foot.position;
+                sole = t.position + Vector3.ProjectOnPlane(sole - t.position, t.up) + t.up * 0.15f;
+                feet.Add(MakeNozzle("BoosterNozzle_" + side + "Sole", foot, sole, -t.up, t.forward));
+            }
+
+            MechBoosterFlames fx = suit.AddComponent<MechBoosterFlames>();
+            fx.backNozzles = back.ToArray();
+            fx.footNozzles = feet.ToArray();
+            fx.flameMaterial = mat;
+            fx.colony = colony;
+            fx.bodyHeight = MobileSuitTargetHeight;
+            fx.health = suit.GetComponent<EnemyHealth>();
+            if (gundam) { fx.backLength = 6.5f; fx.backWidth = 3.0f; }
+            else { fx.backLength = 6f; fx.backWidth = 3.4f; }
+        }
+
+        static Transform MakeNozzle(string name, Transform parent, Vector3 worldPos, Vector3 exhaustDir, Vector3 upHint)
+        {
+            GameObject n = new GameObject(name);
+            n.layer = parent.gameObject.layer;
+            n.transform.SetPositionAndRotation(worldPos, Quaternion.LookRotation(exhaustDir, Mathf.Abs(Vector3.Dot(exhaustDir.normalized, upHint.normalized)) > 0.95f ? Vector3.forward : upHint));
+            n.transform.SetParent(parent, true);
+            return n.transform;
         }
 
         // ---------------------------------------------------------------
@@ -3499,6 +3934,10 @@ namespace Gundam.EditorTools
             SetLayerRecursively(holder, 0);
 
             ZakuMachineGun mg = zaku.AddComponent<ZakuMachineGun>();
+            // Firing sound (per "이거를 자쿠가 총을 쏘는 소리로 넣어줘", then replaced by the
+            // Machine_gun_2 burst loop per "이거를 자쿠 총소리로 해주고").
+            mg.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Zaku_MachineGun_FireLoop.wav");
+            if (mg.fireSound == null) Debug.LogWarning("[Gundam] Zaku gun sound 'Assets/Audio/Zaku_MachineGun_FireLoop.wav' not found - the Zaku fires silently.");
             mg.upperArm = upper;
             mg.foreArm = fore;
             mg.hand = hand;
@@ -3526,6 +3965,658 @@ namespace Gundam.EditorTools
             mg.flashMaterial = MakeEmissiveMat(new Color(1f, 0.8f, 0.4f), new Color(3.5f, 2.2f, 0.8f));
             Debug.Log("[Gundam] " + zaku.name + ": machine gun in " + hand.name + " (" + ZakuGunScale + " m, 50 dmg, 100 rds, 280 rpm, 5 s reload)" +
                 (mg.target != null ? "." : " - NO PlayerHealth target found."));
+        }
+
+        // ---------------------------------------------------------------
+        // HEAT HAWK - per "방금 자쿠가 사용할 도끼를 다운했어 택스쳐도 다운했어 그거를
+        // 자쿠손에 잡고 휘두러서 공격하게해줘". The downloaded "Sci-Fi Battle Axe" (copied
+        // to HeatHawkModelPath with its base color). Measured from its vertices: it lies
+        // along mesh +X (pommel spike at -X, head at +X), the curved cutting edge hangs
+        // toward mesh -Z, the handle axis runs at z ~ 0.04. The root built here is the
+        // same convention as the beam saber: +Y along the handle toward the head (the
+        // fist's grip axis - thumb toward the head), +Z = cutting edge (= the knuckles'
+        // direction, so a chop leads with the edge), origin = grip point in the fist.
+        // ---------------------------------------------------------------
+        const string HeatHawkModelPath = "Assets/Models/HeatHawk/HeatHawk.fbx";
+        const string HeatHawkTexturePath = "Assets/Models/HeatHawk/HeatHawk-baseColor.png";
+        const float HeatHawkScale = 7.5f;                                            // ~1 unit long model -> 7.5 m
+        static readonly Vector3 HeatHawkModelGrip = new Vector3(-0.32f, 0f, 0.04f);  // on the handle, near the pommel
+        const float HeatHawkBladeStart = (0.32f - 0.08f) * HeatHawkScale;            // head starts at mesh x ~ -0.08
+        const float HeatHawkBladeLength = 0.56f * HeatHawkScale;                     // ...and ends at x ~ +0.48
+        static Quaternion HeatHawkModelToRoot => Quaternion.LookRotation(Vector3.back, Vector3.right); // mesh +X -> +Y, mesh -Z -> +Z
+
+        static Transform BuildHeatHawk(Transform handBone, Vector3 gripInHandMeters)
+        {
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(HeatHawkModelPath);
+            if (asset == null)
+            {
+                Debug.LogWarning("[Gundam] HEAT HAWK model not found at " + HeatHawkModelPath + ".");
+                return null;
+            }
+            GameObject root = new GameObject("HeatHawk");
+            root.transform.SetParent(handBone, false);
+            float ls = handBone.lossyScale.x > 0.0001f ? 1f / handBone.lossyScale.x : 1f;
+            root.transform.localScale = Vector3.one * ls; // 1 unit = 1 m
+            root.transform.localPosition = gripInHandMeters * ls;
+            root.transform.localRotation = Quaternion.identity;
+
+            GameObject model = (GameObject)PrefabUtility.InstantiatePrefab(asset);
+            model.name = "HeatHawk_Model";
+            model.transform.SetParent(root.transform, false);
+            model.transform.localRotation = HeatHawkModelToRoot;
+            model.transform.localScale = Vector3.one * HeatHawkScale;
+            model.transform.localPosition = -(HeatHawkModelToRoot * (HeatHawkModelGrip * HeatHawkScale));
+
+            Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(HeatHawkTexturePath);
+            Material mat = MakeMat(Color.white);
+            mat.name = "HeatHawk";
+            if (tex != null) mat.mainTexture = tex;
+            foreach (Renderer r in model.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            foreach (Collider c in model.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            SetLayerRecursively(root, 0);
+            root.SetActive(false); // drawn only while in use
+            return root.transform;
+        }
+
+        /// <summary>Enemy ZAKU: heat hawk in the right hand + MeleeWeaponAI, which decides
+        /// by itself between the machine gun and the heat hawk (per "지금 내 건담처럼 ai가
+        /// 골라서 전투").</summary>
+        static void AddZakuHeatHawk(GameObject zaku, Transform player)
+        {
+            Transform upper = FindDeepChild(zaku.transform, "RightArm");
+            Transform fore = FindDeepChild(zaku.transform, "RightForeArm");
+            Transform hand = FindDeepChild(zaku.transform, "RightHand");
+            if (upper == null || fore == null || hand == null) return;
+            Transform hawk = BuildHeatHawk(hand, ZakuFistGripUnscaled * hand.lossyScale.x);
+            if (hawk == null) return;
+            MeleeWeaponAI m = zaku.AddComponent<MeleeWeaponAI>();
+            m.ai = zaku.GetComponent<ZakuCombatAI>();
+            m.gun = zaku.GetComponent<ZakuMachineGun>();
+            m.target = player != null ? player.GetComponent<PlayerHealth>() : null;
+            m.upperArm = upper; m.foreArm = fore; m.hand = hand;
+            m.weapon = hawk;
+            m.damage = 250;
+            m.bladeStart = HeatHawkBladeStart;
+            m.bladeLength = HeatHawkBladeLength;
+            m.hitRadius = 1.6f;
+            m.swingSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamSaber_Swing.wav");
+        }
+
+        /// <summary>Gun holder with the Zaku machine gun model: +Z muzzle, +Y top,
+        /// 1 unit = 1 m (points: ZakuGunModel* x ZakuGunScale).</summary>
+        static Transform BuildZakuGunHolder(Transform parent, string name)
+        {
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuGunModelPath);
+            if (asset == null) return null;
+            GameObject holder = new GameObject(name);
+            holder.transform.SetParent(parent, false);
+            float ls = parent.lossyScale.x > 0.0001f ? 1f / parent.lossyScale.x : 1f;
+            holder.transform.localScale = Vector3.one * ls;
+            GameObject model = (GameObject)PrefabUtility.InstantiatePrefab(asset);
+            model.name = name + "_Model";
+            Quaternion defaultRot = model.transform.localRotation;
+            model.transform.SetParent(holder.transform, false);
+            model.transform.localPosition = Vector3.zero;
+            model.transform.localRotation = defaultRot;
+            model.transform.localScale = Vector3.one * ZakuGunScale;
+            Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuGunTexturePath);
+            Material mat = MakeMat(Color.white);
+            mat.name = "ZakuMachineGun";
+            if (tex != null) mat.mainTexture = tex;
+            foreach (Renderer r in model.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            foreach (Collider c in model.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            SetLayerRecursively(holder, 0);
+            return holder.transform;
+        }
+
+        // ---------------------------------------------------------------
+        // PLAYABLE ZAKU - per "자쿠를 플레이할수있게해줘야해 게임을 시작하고 자쿠로 할지
+        // 건담으로 할지 고르게 하는거야 그리고 자쿠로 고르면 무기창에 히트호크랑 머신건이
+        // 있는거야". Built next to the Gundam (same spot, same follower / collision /
+        // hit points setup) but switched off; PilotMechSwitcher swaps it in when the
+        // pilot picks ZAKU on the MOBILE SUIT panel. Its weapons reuse the Gundam's
+        // proven controllers with Zaku bones and models:
+        //   MACHINE GUN = BeamRifleController (both hands, lock + right thumb, held =
+        //                 full auto 280 rpm, 100 rounds, 5 s reload, 50 damage)
+        //   HEAT HAWK   = BeamSaberArmController + BeamSaberBlade (RightJoystick
+        //                 thrust / swing, 300 damage per hit)
+        //   BAZOOKA     = a second BeamRifleController (beam-rifle controls: lock +
+        //                 right thumb; 1000 damage, 5 shells, 6 s reload)
+        // Player ZAKU hit points: 5000.
+        // Enemies for the ZAKU: enemy GUNDAMs (beam rifle + beam saber, the AI picks).
+        // ---------------------------------------------------------------
+        const string ZakuRightArmMeshPath = "Assets/Models/Zaku/ZakuRightArm_View.asset";
+        const string ZakuLeftArmMeshPath = "Assets/Models/Zaku/ZakuLeftArm_View.asset";
+        static readonly Vector3 ZakuGunModelStock = new Vector3(0f, -0.02f, -0.47f); // back end of the gun
+
+        class PlayerZakuResult
+        {
+            public GameObject body;
+            public Transform head;
+            public Transform headCamMount;
+            public BeamRifleController gun;
+            public BeamSaberArmController hawk;
+            public BeamRifleController bazooka;
+        }
+
+        // ZAKU BAZOOKA - per "자쿠 바주카를 다운했고 그거를 자쿠에게 적용해줘 조작법은
+        // 빔라이플이랑 같아" + "데미지는 1000이야". Model ~1 unit long along mesh Y:
+        // shoulder pad / rear at mesh +Y, muzzle bell at mesh -Y, sight on top (+Z) -
+        // the same layout as the beam rifle model, so RifleModelToRoot maps it to the
+        // rifle-root frame (+Z muzzle, +Y top). Points below are mesh-local (measured
+        // from side renders of the model).
+        const string ZakuBazookaModelPath = "Assets/Models/ZakuBazooka/ZakuBazooka.fbx";
+        const string ZakuBazookaTexturePath = "Assets/Models/ZakuBazooka/ZakuBazooka-baseColor.png";
+        const float ZakuBazookaScale = 9f;                                                    // ~9 m bazooka for the 18 m Zaku
+        static readonly Vector3 ZakuBazookaModelStock = new Vector3(0f, 0.42f, 0.016f);      // shoulder pad (on the barrel axis)
+        static readonly Vector3 ZakuBazookaModelMuzzle = new Vector3(0f, -0.48f, 0.016f);    // front of the muzzle bell
+        static readonly Vector3 ZakuBazookaModelGrip = new Vector3(0f, 0.03f, -0.07f);       // pistol grip (right hand)
+        static readonly Vector3 ZakuBazookaModelForeGrip = new Vector3(0f, -0.18f, -0.06f);  // front grip (left hand)
+
+        /// <summary>Bazooka holder: +Z muzzle, +Y top, 1 unit = 1 m. Built switched off.</summary>
+        static Transform BuildZakuBazooka(Transform parent)
+        {
+            GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuBazookaModelPath);
+            if (asset == null)
+            {
+                Debug.LogWarning("[Gundam] ZAKU BAZOOKA: model not found at " + ZakuBazookaModelPath + " - bazooka disabled.");
+                return null;
+            }
+            GameObject root = new GameObject("PlayerZakuBazooka");
+            root.transform.SetParent(parent, false);
+            float ls = parent.lossyScale.x > 0.0001f ? 1f / parent.lossyScale.x : 1f;
+            root.transform.localScale = Vector3.one * ls;
+
+            GameObject model = (GameObject)PrefabUtility.InstantiatePrefab(asset);
+            model.name = "ZakuBazooka_Model";
+            model.transform.SetParent(root.transform, false);
+            model.transform.localPosition = Vector3.zero;
+            model.transform.localRotation = RifleModelToRoot;
+            model.transform.localScale = Vector3.one * ZakuBazookaScale;
+
+            Texture2D tex = AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuBazookaTexturePath);
+            if (tex == null) Debug.LogWarning("[Gundam] ZAKU BAZOOKA: texture not found at " + ZakuBazookaTexturePath + ".");
+            Material mat = MakeMat(Color.white);
+            mat.name = "ZakuBazooka";
+            if (tex != null) mat.mainTexture = tex;
+            foreach (Renderer r in model.GetComponentsInChildren<Renderer>(true))
+            {
+                Material[] mats = r.sharedMaterials;
+                for (int i = 0; i < mats.Length; i++) mats[i] = mat;
+                r.sharedMaterials = mats;
+                r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
+            foreach (Collider c in model.GetComponentsInChildren<Collider>(true)) UnityEngine.Object.DestroyImmediate(c);
+            SetLayerRecursively(root, 0);
+            root.SetActive(false); // shown only while the BAZOOKA is selected
+            return root.transform;
+        }
+
+        /// <summary>Second renderer of an arm view (same mesh / bones), so each weapon
+        /// shows and hides its own copy and never hides the arm another weapon shows.</summary>
+        static SkinnedMeshRenderer CloneArmView(SkinnedMeshRenderer src, string name)
+        {
+            if (src == null) return null;
+            GameObject go = new GameObject(name);
+            go.transform.SetParent(src.transform.parent, false);
+            go.transform.localPosition = src.transform.localPosition;
+            go.transform.localRotation = src.transform.localRotation;
+            go.transform.localScale = src.transform.localScale;
+            go.layer = src.gameObject.layer;
+            SkinnedMeshRenderer v = go.AddComponent<SkinnedMeshRenderer>();
+            v.sharedMesh = src.sharedMesh;
+            v.bones = src.bones;
+            v.rootBone = src.rootBone;
+            v.sharedMaterials = src.sharedMaterials;
+            v.updateWhenOffscreen = true;
+            v.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            v.enabled = false;
+            return v;
+        }
+
+        static PlayerZakuResult BuildPlayerZaku(GameObject suitRoot, GameObject interior, GameObject xrOrigin, JoystickLever rightStick,
+            CockpitHUDManager hudManager, Vector3 bodyPosition)
+        {
+            GameObject fbx = AssetDatabase.LoadAssetAtPath<GameObject>(ZakuModelPath);
+            if (fbx == null) { Debug.LogWarning("[Gundam] Playable ZAKU: Zaku FBX not found."); return null; }
+            GameObject zaku = (GameObject)PrefabUtility.InstantiatePrefab(fbx);
+            zaku.name = "PlayerZaku";
+            zaku.transform.SetParent(null);
+            zaku.transform.position = bodyPosition;
+            zaku.transform.rotation = Quaternion.identity;
+            zaku.transform.localScale = Vector3.one;
+            float h = MeasureMeshHeight(zaku);
+            if (h > 0.0001f) zaku.transform.localScale = Vector3.one * (MobileSuitTargetHeight / h);
+            SetLayerRecursively(zaku, GundamBodyLayer); // the pilot never sees their own body
+            ApplyBaseColorTexture(zaku, AssetDatabase.LoadAssetAtPath<Texture2D>(ZakuTexturePath), "PlayerZaku");
+
+            Transform head = FindDeepChild(zaku.transform, "Head");
+            Transform rUpper = FindDeepChild(zaku.transform, "RightArm");
+            Transform rFore = FindDeepChild(zaku.transform, "RightForeArm");
+            Transform rHand = FindDeepChild(zaku.transform, "RightHand");
+            Transform lUpper = FindDeepChild(zaku.transform, "LeftArm");
+            Transform lFore = FindDeepChild(zaku.transform, "LeftForeArm");
+            Transform lHand = FindDeepChild(zaku.transform, "LeftHand");
+            if (head == null || rUpper == null || rFore == null || rHand == null || lUpper == null || lFore == null || lHand == null)
+            {
+                Debug.LogWarning("[Gundam] Playable ZAKU: bones not found - skipped.");
+                UnityEngine.Object.DestroyImmediate(zaku);
+                return null;
+            }
+
+            // Head camera mount at the mono-eye (same rule as the Gundam's HeadCam:
+            // 92 % of the height, nudged 4 % forward out of the head geometry).
+            SkinnedMeshRenderer smr = zaku.GetComponentInChildren<SkinnedMeshRenderer>();
+            Bounds b = smr != null ? smr.bounds : new Bounds(head.position, Vector3.one);
+            GameObject mount = new GameObject("HeadCamMount");
+            mount.transform.position = new Vector3(b.center.x, b.min.y + b.size.y * 0.92f, b.center.z + b.size.y * 0.04f);
+            mount.transform.rotation = Quaternion.LookRotation(Vector3.forward, Vector3.up);
+            mount.transform.SetParent(head, true);
+            mount.layer = GundamBodyLayer;
+
+            CockpitViewController view = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+            ExternalGundamFollower follower = zaku.AddComponent<ExternalGundamFollower>();
+            follower.target = suitRoot.transform;
+            follower.viewController = view;
+            follower.turnPivot = head;
+            follower.faceViewDirection = true;
+
+            PlayerHealth hp = zaku.AddComponent<PlayerHealth>();
+            hp.maxHealth = 5000; // per "플레이어 자쿠 체력은 5000이야"
+            hp.hudManager = hudManager;
+            hp.capsuleTop = MobileSuitTargetHeight - 1f;
+
+            MechWalkAnimator walk = zaku.AddComponent<MechWalkAnimator>();
+            walk.suit = suitRoot.GetComponent<SuitCollision>();
+
+            // Arm-only views (the body itself stays hidden).
+            SkinnedMeshRenderer rightView = BuildGundamArmView(zaku, new[] { "RightArm", "RightForeArm", "RightHand" }, "ZakuRightArm_View", ZakuRightArmMeshPath);
+            SkinnedMeshRenderer leftView = BuildGundamArmView(zaku, new[] { "LeftArm", "LeftForeArm", "LeftHand" }, "ZakuLeftArm_View", ZakuLeftArmMeshPath);
+            SkinnedMeshRenderer gunRightView = null;
+            if (rightView != null)
+            {
+                GameObject rv = new GameObject("ZakuRightArm_GunView");
+                rv.transform.SetParent(rightView.transform.parent, false);
+                rv.transform.localPosition = rightView.transform.localPosition;
+                rv.transform.localRotation = rightView.transform.localRotation;
+                rv.transform.localScale = rightView.transform.localScale;
+                rv.layer = 0;
+                gunRightView = rv.AddComponent<SkinnedMeshRenderer>();
+                gunRightView.sharedMesh = rightView.sharedMesh;
+                gunRightView.bones = rightView.bones;
+                gunRightView.rootBone = rightView.rootBone;
+                gunRightView.sharedMaterials = rightView.sharedMaterials;
+                gunRightView.updateWhenOffscreen = true;
+                gunRightView.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                gunRightView.enabled = false;
+            }
+
+            Camera cam = xrOrigin != null ? xrOrigin.GetComponentInChildren<Camera>(true) : null;
+            Vector3 fist = ZakuFistGripUnscaled * rHand.lossyScale.x;
+
+            // --- HEAT HAWK (RightJoystick thrust / swing, like the beam saber) ---
+            BeamSaberArmController hawkArm = null;
+            Transform hawk = BuildHeatHawk(rHand, fist);
+            if (hawk != null)
+            {
+                BeamSaberBlade blade = hawk.gameObject.AddComponent<BeamSaberBlade>();
+                blade.damage = 300;
+                blade.bladeStart = HeatHawkBladeStart;
+                blade.bladeLength = HeatHawkBladeLength;
+                blade.hitRadius = 1.4f;
+                blade.sparkMaterial = MakeEmissiveMat(new Color(1f, 0.45f, 0.1f), new Color(3f, 1.2f, 0.3f));
+                blade.swingSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamSaber_Swing.wav");
+                hawkArm = zaku.AddComponent<BeamSaberArmController>();
+                hawkArm.upperArm = rUpper;
+                hawkArm.foreArm = rFore;
+                hawkArm.handBone = rHand;
+                hawkArm.armView = rightView;
+                hawkArm.saber = hawk;
+                hawkArm.rightStick = rightStick;
+                hawkArm.cockpitSpace = interior.transform;
+                hawkArm.viewController = view;
+                if (cam != null) hawkArm.pilotHead = cam.transform;
+            }
+
+            // --- MACHINE GUN (both hands, lock + right thumb; held = full auto) ---
+            BeamRifleController gun = null;
+            Transform holder = BuildZakuGunHolder(zaku.transform, "PlayerZakuMachineGun");
+            if (holder != null)
+            {
+                holder.gameObject.SetActive(false);
+                gun = zaku.AddComponent<BeamRifleController>();
+                gun.rightUpperArm = rUpper; gun.rightForeArm = rFore; gun.rightHand = rHand;
+                gun.leftUpperArm = lUpper; gun.leftForeArm = lFore; gun.leftHand = lHand;
+                gun.rifle = holder;
+                gun.rightArmView = gunRightView;
+                gun.leftArmView = leftView;
+                float S = ZakuGunScale;
+                gun.stockPoint = ZakuGunModelStock * S;
+                gun.muzzlePoint = ZakuGunModelMuzzle * S;
+                gun.rightGripPoint = ZakuGunModelGrip * S;
+                Vector3 thumb = ZakuGunGripThumb.normalized;
+                gun.rightGripThumb = thumb;
+                gun.rightGripFingers = Vector3.ProjectOnPlane(Vector3.forward, thumb).normalized;
+                gun.leftGripPoint = ZakuGunModelForeGrip * S;
+                gun.leftGripThumb = Vector3.forward;
+                gun.leftGripFingers = Vector3.right;
+                gun.rightFistGrip = fist;
+                gun.viewController = view;
+                gun.cockpitSpace = interior.transform;
+                gun.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
+                gun.fireButtons = rightStick != null ? rightStick.GetComponent<JoystickFingerButtons>() : null;
+                gun.damage = 50;
+                gun.maxShots = 100;
+                gun.rechargeTime = 5f;
+                gun.fireCooldown = 60f / 280f;
+                gun.shotSpeed = 320f;
+                gun.shotLength = 5f;
+                gun.shotRadius = 0.18f;
+                gun.shotHitRadius = 0.6f;
+                gun.muzzleFlashSize = 1.6f;
+                gun.unlockedSpread = new Vector2(1f, 3f);
+                gun.rifleLockTime = 1f;
+                gun.shotGlowMaterial = MakeEmissiveMat(new Color(1f, 0.75f, 0.3f), new Color(3f, 1.8f, 0.5f));
+                gun.shotCoreMaterial = MakeEmissiveMat(new Color(1f, 0.95f, 0.8f), new Color(4f, 3.5f, 2f));
+                gun.weaponHUD = interior.GetComponentInChildren<CockpitWeaponHUD>(true);
+                gun.hudName = "MACHINE GUN";
+                gun.ammoLabel = "AMMO";
+                gun.rechargeLabel = "RELOADING";
+                gun.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Zaku_MachineGun_FireLoop.wav");
+                gun.fireSoundLoop = true;
+            }
+
+            // --- BAZOOKA (both hands, lock + right thumb - same controls as the beam
+            //     rifle; 1000 damage per shell, 5 shells, 6 s reload) ---
+            BeamRifleController baz = null;
+            Transform bazooka = BuildZakuBazooka(zaku.transform);
+            if (bazooka != null)
+            {
+                baz = zaku.AddComponent<BeamRifleController>();
+                baz.rightUpperArm = rUpper; baz.rightForeArm = rFore; baz.rightHand = rHand;
+                baz.leftUpperArm = lUpper; baz.leftForeArm = lFore; baz.leftHand = lHand;
+                baz.rifle = bazooka;
+                baz.rightArmView = CloneArmView(gunRightView != null ? gunRightView : rightView, "ZakuRightArm_BazookaView");
+                baz.leftArmView = CloneArmView(leftView, "ZakuLeftArm_BazookaView");
+                Quaternion q = RifleModelToRoot;
+                float S = ZakuBazookaScale;
+                baz.stockPoint = q * ZakuBazookaModelStock * S;
+                baz.muzzlePoint = q * ZakuBazookaModelMuzzle * S;
+                baz.rightGripPoint = q * ZakuBazookaModelGrip * S;
+                Vector3 thumb = new Vector3(0f, 1f, 0.25f).normalized; // up the (slightly raked) pistol grip
+                baz.rightGripThumb = thumb;
+                baz.rightGripFingers = Vector3.ProjectOnPlane(Vector3.forward, thumb).normalized;
+                baz.leftGripPoint = q * ZakuBazookaModelForeGrip * S;
+                baz.leftGripThumb = Vector3.forward;
+                baz.leftGripFingers = Vector3.right;
+                baz.rightFistGrip = fist;
+                baz.viewController = view;
+                baz.cockpitSpace = interior.transform;
+                baz.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
+                baz.fireButtons = rightStick != null ? rightStick.GetComponent<JoystickFingerButtons>() : null;
+                baz.damage = 1000; // per "데미지는 1000이야"
+                baz.maxShots = 5;
+                baz.rechargeTime = 6f;
+                baz.fireCooldown = 1.2f;
+                baz.shotSpeed = 170f;
+                baz.shotLength = 3.5f;
+                baz.shotRadius = 0.55f;
+                baz.shotHitRadius = 2f;
+                baz.muzzleFlashSize = 4.5f;
+                baz.impactFlashSize = 16f;
+                baz.unlockedSpread = new Vector2(1.5f, 4f);
+                baz.rifleLockTime = 1.5f;
+                baz.shotGlowMaterial = MakeEmissiveMat(new Color(1f, 0.5f, 0.15f), new Color(3.5f, 1.3f, 0.3f));
+                baz.shotCoreMaterial = MakeEmissiveMat(new Color(1f, 0.9f, 0.6f), new Color(4f, 3f, 1.2f));
+                baz.weaponHUD = interior.GetComponentInChildren<CockpitWeaponHUD>(true);
+                baz.hudName = "BAZOOKA";
+                baz.ammoLabel = "AMMO";
+                baz.rechargeLabel = "RELOADING";
+                // No bazooka clip yet: the beam rifle shot, played low and heavy.
+                baz.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamRifle_Fire.wav");
+                baz.firePitch = 0.6f;
+                baz.fireVolume = 1f;
+            }
+
+            zaku.SetActive(false); // PilotMechSwitcher switches it on when ZAKU is chosen
+            Debug.Log("[Gundam] Playable ZAKU built (switched off until chosen): machine gun " + (gun != null) + ", heat hawk " + (hawkArm != null) + ", bazooka " + (baz != null) + ", HP " + hp.maxHealth + ".");
+            return new PlayerZakuResult { body = zaku, head = head, headCamMount = mount.transform, gun = gun, hawk = hawkArm, bazooka = baz };
+        }
+
+        /// <summary>Enemy GUNDAM for ZAKU mode: beam rifle (ZakuMachineGun set up for single
+        /// beam shots) + beam saber (MeleeWeaponAI) - the AI picks, like the enemy Zakus.
+        /// Built switched off.</summary>
+        static GameObject PlaceEnemyGundam(string name, Vector3 spawn, Transform player, ColonyStructure colony)
+        {
+            GameObject fbx = AssetDatabase.LoadAssetAtPath<GameObject>(GundamModelPath);
+            if (fbx == null) return null;
+            GameObject g = (GameObject)PrefabUtility.InstantiatePrefab(fbx);
+            g.name = name;
+            g.transform.SetParent(null);
+            g.transform.position = spawn;
+            Vector3 face = (player != null ? player.position : new Vector3(0f, 0f, 20f)) - spawn;
+            face.y = 0f;
+            g.transform.rotation = face.sqrMagnitude > 0.01f ? Quaternion.LookRotation(face, Vector3.up) : Quaternion.Euler(0f, 180f, 0f);
+            g.transform.localScale = Vector3.one;
+            float h = MeasureMeshHeight(g);
+            if (h > 0.0001f) g.transform.localScale = Vector3.one * (MobileSuitTargetHeight / h);
+            ApplyBaseColorTexture(g, AssetDatabase.LoadAssetAtPath<Texture2D>(GundamBaseColorTexturePath), name);
+
+            g.AddComponent<EnemyMarker>();
+            float lh = h > 0.0001f ? h : 1f;
+            CapsuleCollider hit = g.AddComponent<CapsuleCollider>();
+            hit.direction = 1;
+            hit.height = lh;
+            hit.radius = lh * 0.22f;
+            hit.center = new Vector3(0f, lh * 0.5f, 0f);
+
+            EnemyHealth health = g.AddComponent<EnemyHealth>();
+            health.maxHealth = 1500;
+            health.respawnDelay = 6f;
+            health.effectMaterial = MakeEmissiveMat(new Color(0.35f, 0.12f, 0.02f), new Color(1f, 0.5f, 0.1f));
+            health.barHeightAboveRoot = MobileSuitTargetHeight + 2f;
+            health.faceTowards = player;
+
+            ZakuCombatAI ai = g.AddComponent<ZakuCombatAI>();
+            ai.target = player;
+            ai.preferredDistance = 70f;
+            ai.arena = colony;
+            ai.approachSpeed = 12f;
+            ai.strafeSpeed = 10f;
+
+            PlayerHealth playerHp = player != null ? player.GetComponent<PlayerHealth>() : null;
+            Transform upper = FindDeepChild(g.transform, "RightArm");
+            Transform fore = FindDeepChild(g.transform, "RightForeArm");
+            Transform hand = FindDeepChild(g.transform, "RightHand");
+
+            // Beam rifle (single beam shots).
+            Transform rifle = BuildBeamRifle(g.transform);
+            if (rifle != null && upper != null && fore != null && hand != null)
+            {
+                rifle.gameObject.SetActive(true);
+                ZakuMachineGun mg = g.AddComponent<ZakuMachineGun>();
+                mg.upperArm = upper; mg.foreArm = fore; mg.hand = hand;
+                mg.leftUpperArm = FindDeepChild(g.transform, "LeftArm");
+                mg.leftForeArm = FindDeepChild(g.transform, "LeftForeArm");
+                mg.leftHand = FindDeepChild(g.transform, "LeftHand");
+                mg.chest = FindDeepChild(g.transform, "Spine2") ?? FindDeepChild(g.transform, "Spine1");
+                mg.head = FindDeepChild(g.transform, "Head");
+                Quaternion q = RifleModelToRoot;
+                float S = BeamRifleScale;
+                mg.gun = rifle;
+                mg.gripPoint = q * RifleModelGrip * S;
+                mg.muzzlePoint = q * RifleModelMuzzle * S;
+                mg.supportPoint = q * RifleModelForeGrip * S;
+                Vector3 thumb = (q * -RifleModelGripOutward).normalized;
+                mg.gripThumb = thumb;
+                mg.gripFingers = Vector3.ProjectOnPlane(Vector3.forward, thumb).normalized;
+                mg.fistGrip = BeamSaberGripInHand;
+                mg.target = playerHp;
+                mg.aimHeight = MobileSuitTargetHeight * 0.6f;
+                mg.damage = 150;
+                mg.magazine = 15;
+                mg.reloadTime = 5f;
+                mg.roundsPerMinute = 45f;
+                mg.bulletSpeed = 380f;
+                mg.spread = 0.8f;
+                mg.burstRounds = new Vector2Int(1, 2);
+                mg.burstPause = new Vector2(1.0f, 2.6f);
+                mg.engageRange = 320f;
+                mg.tracerLength = 12f;
+                mg.tracerWidth = 0.7f;
+                mg.tracerMaterial = MakeEmissiveMat(new Color(1f, 0.3f, 0.65f), new Color(3.2f, 0.7f, 1.8f));
+                mg.flashMaterial = mg.tracerMaterial;
+                mg.fireSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamRifle_Fire.wav");
+                mg.loopSound = false;
+            }
+
+            // Beam saber (AI melee - its blade damages the player through MeleeWeaponAI,
+            // not BeamSaberBlade, which hits EnemyHealth).
+            if (hand != null)
+            {
+                Transform saber = BuildBeamSaber(hand);
+                BeamSaberBlade playerBlade = saber.GetComponent<BeamSaberBlade>();
+                if (playerBlade != null) UnityEngine.Object.DestroyImmediate(playerBlade);
+                MeleeWeaponAI m = g.AddComponent<MeleeWeaponAI>();
+                m.ai = ai;
+                m.gun = g.GetComponent<ZakuMachineGun>();
+                m.target = playerHp;
+                m.upperArm = upper; m.foreArm = fore; m.hand = hand;
+                m.weapon = saber;
+                m.damage = 300;
+                m.bladeStart = BeamSaberHiltLength * 0.5f;
+                m.bladeLength = BeamSaberBladeLength;
+                m.hitRadius = 0.9f;
+                m.strikeRange = 22f;
+                m.approachDistance = 13f;
+                m.swingSound = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/Gundam_BeamSaber_Swing.wav");
+            }
+
+            AddBoosterFlames(g, true, colony);
+
+            g.SetActive(false); // only in ZAKU mode
+            return g;
+        }
+
+        /// <summary>Test helper (no assets written): an enemy ZAKU (machine gun + heat
+        /// hawk) and an enemy GUNDAM (beam rifle + beam saber), both active, aimed at
+        /// 'player' (needs a PlayerHealth), in the currently active scene.</summary>
+        public static GameObject[] BuildEnemyMeleePreview(Transform player, Vector3 zakuPos, Vector3 gundamPos)
+        {
+            PlaceZakuEnemy(player, "PreviewZaku", zakuPos, null);
+            GameObject z = GameObject.Find("PreviewZaku");
+            GameObject g = PlaceEnemyGundam("PreviewGundam", gundamPos, player, null);
+            if (g != null) g.SetActive(true);
+            return new[] { z, g };
+        }
+
+        /// <summary>MOBILE SUIT panel (GUNDAM / ZAKU II) - same floating style and spot as
+        /// the SORTIE POINT panel, shown before it.</summary>
+        static MechSelectPanel BuildMechSelectPanel(Transform interior, Transform suitRoot, CalibrationManager calibration,
+            HandJointTracker leftHand, HandJointTracker rightHand, Behaviour[] pause)
+        {
+            GameObject canvasGo = new GameObject("MechSelect_Canvas");
+            canvasGo.transform.SetParent(interior, false);
+            canvasGo.transform.localPosition = new Vector3(0f, 1.2f, 0.34f);
+            canvasGo.transform.localRotation = Quaternion.identity;
+            canvasGo.transform.localScale = Vector3.one * 0.0009f;
+            RectTransform canvasRect = canvasGo.AddComponent<RectTransform>();
+            canvasRect.sizeDelta = new Vector2(520, 360);
+            Canvas canvas = canvasGo.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.WorldSpace;
+            canvasGo.AddComponent<CanvasScaler>();
+
+            CreateUIImage("Backing", canvasGo.transform, Vector2.zero, new Vector2(520, 360), new Color(0.02f, 0.03f, 0.08f, 0.8f));
+            CreateUIText("Title", canvasGo.transform, new Vector2(0, 148), new Vector2(500, 40), 26, TextAnchor.MiddleCenter,
+                new Color(0.85f, 0.95f, 1f), "MOBILE SUIT  /  기체 선택");
+            string[] labels = { "RX-78-2\nGUNDAM\n건담", "MS-06\nZAKU II\n자쿠" };
+            PilotMechSwitcher.Mech[] mechs = { PilotMechSwitcher.Mech.Gundam, PilotMechSwitcher.Mech.Zaku };
+            Vector2[] pos = { new Vector2(-122, -20), new Vector2(122, -20) };
+            Vector2 size = new Vector2(226, 230); // ~20 x 21 cm
+            MechSelectPanel.TouchButton[] buttons = new MechSelectPanel.TouchButton[2];
+            for (int i = 0; i < 2; i++)
+            {
+                Image bg = CreateUIImage("Btn_Mech_" + mechs[i], canvasGo.transform, pos[i], size, new Color(0.08f, 0.12f, 0.2f, 0.95f));
+                Text t = CreateUIText("Label", bg.transform, Vector2.zero, size, 30, TextAnchor.MiddleCenter, new Color(0.8f, 0.9f, 1f), labels[i]);
+                buttons[i] = new MechSelectPanel.TouchButton { mech = mechs[i], rect = bg.rectTransform, background = bg, label = t };
+            }
+            MechSelectPanel panel = suitRoot.gameObject.AddComponent<MechSelectPanel>();
+            panel.calibration = calibration;
+            panel.pauseUntilChosen = pause;
+            panel.leftHand = leftHand;
+            panel.rightHand = rightHand;
+            panel.buttons = buttons;
+            panel.panelRoot = canvasGo;
+            canvasGo.SetActive(false);
+            return panel;
+        }
+
+        /// <summary>Builds the playable ZAKU, the enemy GUNDAMs and the MOBILE SUIT
+        /// selection, and wires PilotMechSwitcher.</summary>
+        static void SetupZakuMode(GameObject suitRoot, GameObject interior, GameObject xrOrigin, JoystickLever rightStick,
+            HandJointTracker leftHand, HandJointTracker rightHand, CockpitHUDManager hudManager, ColonyStructure colony,
+            GundamPlacementResult gundamResult, CalibrationManager calibration, Behaviour[] pause)
+        {
+            if (gundamResult == null || gundamResult.instance == null || gundamResult.headCam360 == null) return;
+
+            // The pilot's GUNDAM walks too (legs only; floats in space / in the air).
+            MechWalkAnimator gWalk = gundamResult.instance.AddComponent<MechWalkAnimator>();
+            gWalk.suit = suitRoot.GetComponent<SuitCollision>();
+
+            // Enemies of the GUNDAM = everything with an EnemyMarker so far (the Zakus).
+            GameObject[] zakus = UnityEngine.Object.FindObjectsByType<EnemyMarker>(FindObjectsInactive.Exclude)
+                .Select(e => e.gameObject).ToArray();
+
+            PlayerZakuResult z = BuildPlayerZaku(suitRoot, interior, xrOrigin, rightStick, hudManager, gundamResult.instance.transform.position);
+            if (z == null) return;
+
+            Vector3[] spawns = colony != null ? ColonyZakuSpawns().Take(6).ToArray() : ZakuSpawnPoints;
+            var gundams = new System.Collections.Generic.List<GameObject>();
+            for (int i = 0; i < spawns.Length; i++)
+            {
+                GameObject eg = PlaceEnemyGundam("EnemyGundam_" + (i + 1), spawns[i], z.body.transform, colony);
+                if (eg != null) gundams.Add(eg);
+            }
+
+            MechSelectPanel mechPanel = BuildMechSelectPanel(interior.transform, suitRoot.transform, calibration, leftHand, rightHand, pause);
+            PilotMechSwitcher sw = suitRoot.AddComponent<PilotMechSwitcher>();
+            sw.suitRoot = suitRoot.transform;
+            sw.gundamBody = gundamResult.instance;
+            sw.zakuBody = z.body;
+            sw.zakuHead = z.head;
+            sw.zakuHeadCamMount = z.headCamMount;
+            sw.headCam = gundamResult.headCam360.headCam.transform;
+            sw.headCam360 = gundamResult.headCam360;
+            sw.viewController = suitRoot.GetComponentInChildren<CockpitViewController>(true);
+            sw.modes = suitRoot.GetComponent<WeaponModeController>();
+            sw.weaponPanel = interior.GetComponentInChildren<WeaponTouchPanel>(true);
+            sw.zakuGun = z.gun;
+            sw.zakuHawk = z.hawk;
+            sw.zakuBazooka = z.bazooka;
+            sw.hud = suitRoot.GetComponent<CockpitHUD>();
+            sw.weaponHUD = interior.GetComponentInChildren<CockpitWeaponHUD>(true);
+            sw.targetLock = interior.GetComponentInChildren<OrbitHUDTargetLock>(true);
+            sw.suitCollision = suitRoot.GetComponent<SuitCollision>();
+            sw.spawnPanel = suitRoot.GetComponent<SpawnSelectPanel>();
+            sw.mechPanel = mechPanel;
+            sw.gundamModeEnemies = zakus;
+            sw.zakuModeEnemies = gundams.ToArray();
+            sw.cockpitInterior = interior.transform;
+            mechPanel.switcher = sw;
+            if (sw.spawnPanel != null) sw.spawnPanel.mechSelect = mechPanel;
+            Debug.Log("[Gundam] MOBILE SUIT selection: GUNDAM (vs " + zakus.Length + " Zakus) / ZAKU II (vs " + gundams.Count + " Gundams).");
         }
 
         // Applies a base color/albedo texture to every material used by
@@ -4019,7 +5110,7 @@ namespace Gundam.EditorTools
             CreateUIText("Subtitle", centerCanvas.transform, new Vector2(0, 280), new Vector2(600, 26), 15, TextAnchor.MiddleCenter, new Color(0.55f, 0.7f, 0.95f), "- BOOT CONFIGURATION -");
             BuildTickRing(centerCanvas.transform, new Vector2(0, 10), 230f, 48);
             CreateUIText("PilotLabel", centerCanvas.transform, new Vector2(0, 130), new Vector2(500, 24), 14, TextAnchor.MiddleCenter, new Color(0.6f, 0.75f, 0.95f), "PILOT: ---");
-            speedText = CreateUIText("SpeedReadout", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "SPEED 0.0 m/s");
+            speedText = CreateUIText("SpeedReadout", centerCanvas.transform, new Vector2(0, 20), new Vector2(500, 40), 26, TextAnchor.MiddleCenter, new Color(0.85f, 0.95f, 1f), "SPEED 0 km/h");
             statusText = CreateUIText("StatusReadout", centerCanvas.transform, new Vector2(0, -40), new Vector2(500, 30), 20, TextAnchor.MiddleCenter, new Color(0.3f, 1f, 0.4f), "STATUS: NORMAL");
             // Per report ("해드발칸이 몇발 남았는지 내앞에 디스플래이에 표시가
             // 안됨"): RightDisplay's WEAPON screen (CockpitWeaponHUD, see

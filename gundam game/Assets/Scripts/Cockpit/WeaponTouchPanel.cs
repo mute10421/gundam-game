@@ -91,6 +91,13 @@ namespace Gundam.Cockpit
             }
         }
 
+        void Start()
+        {
+            // Hide the buttons this suit doesn't have (the ZAKU-only BAZOOKA for the
+            // GUNDAM) and space the rest evenly - the GUNDAM keeps its 3 buttons as before.
+            ApplyMechLayout();
+        }
+
         void OnEnable()
         {
             if (_fingers == null) Awake();
@@ -158,7 +165,7 @@ namespace Gundam.Cockpit
                 for (int i = 0; i < buttons.Length; i++)
                 {
                     TouchButton b = buttons[i];
-                    if (b.rect == null || !Inside(b.rect, local, hitMargin / scale)) continue;
+                    if (b.rect == null || !b.rect.gameObject.activeInHierarchy || !Inside(b.rect, local, hitMargin / scale)) continue;
                     if (front < hoverDistance && front > -behindTolerance) hover = i;
                     if (f.armed && front <= touchDepth && front > -behindTolerance && Time.time - _lastPressTime > pressCooldown)
                     {
@@ -172,6 +179,33 @@ namespace Gundam.Cockpit
             }
 
             UpdateVisuals(hover);
+        }
+
+        /// <summary>Re-labels the buttons for the current mobile suit (per "자쿠로 고르면
+        /// 무기창에 히트호크랑 머신건이 있는거야"): weapons the suit doesn't have are
+        /// hidden and the rest are spread evenly across the same row.</summary>
+        public void ApplyMechLayout()
+        {
+            if (buttons == null || weapons == null) return;
+            if (_restLocal == null) Awake();
+            int shown = 0;
+            float y = 0f, z = 0f, spacing = 126f;
+            foreach (TouchButton b in buttons) if (b.rect != null && weapons.Has(b.mode)) shown++;
+            int k = 0;
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                TouchButton b = buttons[i];
+                if (b.rect == null) continue;
+                bool has = weapons.Has(b.mode);
+                b.rect.gameObject.SetActive(has);
+                if (!has) continue;
+                y = _restLocal[i].y; z = _restLocal[i].z;
+                float x = (k - (shown - 1) * 0.5f) * spacing;
+                _restLocal[i] = new Vector3(x, y, z);
+                b.rect.localPosition = _restLocal[i];
+                if (b.label != null) b.label.text = weapons.NameOf(b.mode).Replace(' ', '\n');
+                k++;
+            }
         }
 
         static bool Inside(RectTransform r, Vector3 canvasLocal, float margin)
@@ -189,7 +223,7 @@ namespace Gundam.Cockpit
             for (int i = 0; i < buttons.Length; i++)
             {
                 TouchButton b = buttons[i];
-                if (b.background == null) continue;
+                if (b.background == null || (b.rect != null && !b.rect.gameObject.activeSelf)) continue;
                 bool flashing = i == _flashButton && Time.time < _flashUntil;
                 bool selected = b.mode == cur;
                 bool pending = weapons != null && weapons.PendingMode.HasValue && weapons.PendingMode.Value == b.mode;
@@ -208,7 +242,7 @@ namespace Gundam.Cockpit
             {
                 string pend = weapons != null && weapons.PendingMode.HasValue ? "  (RELEASE R-STICK)" : "";
                 string dbg = showTouchDebug && _debugFront < 0.1f ? $"  [{_debugHand} {Mathf.RoundToInt(_debugFront * 1000f)}mm]" : "";
-                currentText.text = "SELECT: " + WeaponModeController.DisplayName(cur) + pend + dbg;
+                currentText.text = "SELECT: " + (weapons != null ? weapons.NameOf(cur) : WeaponModeController.DisplayName(cur)) + pend + dbg;
             }
         }
     }

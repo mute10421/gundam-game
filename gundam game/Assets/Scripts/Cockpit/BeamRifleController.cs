@@ -99,6 +99,8 @@ namespace Gundam.Cockpit
         public Material shotGlowMaterial;
         public Material shotCoreMaterial;
         public float muzzleFlashSize = 2.5f;
+        [Tooltip("Size of the flash where a shot hits (an enemy or a wall). Bigger for the ZAKU BAZOOKA's shell.")]
+        public float impactFlashSize = 6f;
 
         [Header("Lock-on while the rifle is out")]
         [Tooltip("Seconds the OrbitHUD ring needs to lock while BEAM RIFLE is active (its own lockTime is restored afterwards).")]
@@ -108,6 +110,24 @@ namespace Gundam.Cockpit
 
         [Header("WEAPON screen (optional)")]
         public CockpitWeaponHUD weaponHUD;
+
+        [Header("Sound (per \"방금다운로드한 사운드를 빔라이플이 나갈때 나오게 해줘\")")]
+        [Tooltip("Played every time a bolt leaves the rifle. 2D (heard in the cockpit) - the cockpit sits far from the Gundam, so a 3D sound at the muzzle would be out of earshot.")]
+        public AudioClip fireSound;
+        [Range(0f, 1f)] public float fireVolume = 0.9f;
+        [Tooltip("Random pitch variation (+-) so repeated shots don't sound identical.")]
+        [Range(0f, 0.2f)] public float firePitchJitter = 0.03f;
+        [Tooltip("Base pitch of the fire sound (lower = heavier; the BAZOOKA reuses the rifle clip lower).")]
+        [Range(0.3f, 2f)] public float firePitch = 1f;
+        AudioSource _fireAudio;
+        [Tooltip("The clip is a recorded burst: loop it while firing instead of restarting it every shot (ZAKU machine gun).")]
+        public bool fireSoundLoop;
+        LoopingFireSound _fireLoop;
+
+        [Header("WEAPON screen labels")]
+        public string hudName = "BEAM RIFLE";
+        public string ammoLabel = "ENERGY";
+        public string rechargeLabel = "RECHARGING";
 
         public bool Active { get; private set; }
         public float LastFireTime { get; private set; } = -999f;
@@ -131,11 +151,23 @@ namespace Gundam.Cockpit
         Arm _right, _left;
         bool _init;
         float _blend;
+        bool _visualsOn;
         Vector3 _aimDir;
         bool _haveAim;
 
         void Awake()
         {
+            if (fireSound != null && fireSoundLoop)
+            {
+                _fireLoop = new LoopingFireSound(gameObject, fireSound);
+            }
+            else if (fireSound != null)
+            {
+                _fireAudio = gameObject.AddComponent<AudioSource>();
+                _fireAudio.playOnAwake = false;
+                _fireAudio.loop = false;
+                _fireAudio.spatialBlend = 0f;
+            }
             ShotsLeft = maxShots;
             Init();
             SetVisuals(false);
@@ -209,6 +241,7 @@ namespace Gundam.Cockpit
 
         void SetVisuals(bool on)
         {
+            _visualsOn = on;
             if (rifle != null) rifle.gameObject.SetActive(on);
             if (rightArmView != null) rightArmView.enabled = on;
             if (leftArmView != null) leftArmView.enabled = on;
@@ -216,8 +249,10 @@ namespace Gundam.Cockpit
 
         void LateUpdate()
         {
+            if (_fireLoop != null) _fireLoop.Tick();
             if (!_init) return;
             float dt = Time.deltaTime;
+            float prevBlend = _blend;
             _blend = Mathf.MoveTowards(_blend, Active ? 1f : 0f, dt / Mathf.Max(0.01f, blendTime));
 
             if (Recharging && Time.time >= _rechargeEnd)
@@ -226,8 +261,11 @@ namespace Gundam.Cockpit
                 ShotsLeft = maxShots;
             }
 
-            // The left arm is only ever animated by this script - start from rest.
-            if (_left.ok)
+            // The left arm is only ever animated by the rifle-type weapons - start
+            // from rest. Only while THIS weapon is (or was until this frame) out: the
+            // ZAKU carries two of these on the same arms (MACHINE GUN + BAZOOKA), and
+            // the one that's put away must not undo the other's left-hand grip.
+            if (_left.ok && (_blend > 0f || prevBlend > 0f))
             {
                 _left.upper.localRotation = _left.upperRest;
                 _left.fore.localRotation = _left.foreRest;
@@ -236,7 +274,9 @@ namespace Gundam.Cockpit
 
             if (_blend <= 0f)
             {
-                if (!Active) SetVisuals(false);
+                // Hide once (not every frame) - so a weapon that's away never hides
+                // views another weapon is showing.
+                if (!Active && _visualsOn) SetVisuals(false);
                 return;
             }
             if (rifle == null || cockpitSpace == null) return;
@@ -368,6 +408,12 @@ namespace Gundam.Cockpit
         void Fire(Transform tgt)
         {
             LastFireTime = Time.time;
+            if (_fireAudio != null && fireSound != null)
+            {
+                _fireAudio.pitch = firePitch + Random.Range(-firePitchJitter, firePitchJitter);
+                _fireAudio.PlayOneShot(fireSound, fireVolume);
+            }
+            if (_fireLoop != null) _fireLoop.Trigger(fireVolume, 0f, fireCooldown * 1.6f);
             ShotsLeft = Mathf.Max(0, ShotsLeft - 1);
             if (ShotsLeft == 0)
             {
@@ -419,6 +465,7 @@ namespace Gundam.Cockpit
             s.damage = damage;
             s.hitRadius = shotHitRadius;
             s.flashMaterial = shotGlowMaterial;
+            s.flashSize = impactFlashSize;
             s.ignore = ignore;
 
             // Muzzle flash.
@@ -452,14 +499,15 @@ namespace Gundam.Cockpit
         void UpdateHUD()
         {
             if (!Active || weaponHUD == null) return;
-            if (weaponHUD.nameText != null) weaponHUD.nameText.text = "BEAM RIFLE";
+            if (weaponHUD.nameText != null) weaponHUD.nameText.text = hudName;
             if (weaponHUD.ammoText != null)
             {
                 string lockTxt = "";
                 if (LockedTarget() != null) lockTxt = "  LOCK";
                 else if (targetLock != null && targetLock.CurrentTarget != null)
                     lockTxt = "  LOCKING " + Mathf.RoundToInt(targetLock.LockProgress * 100f) + "%";
-                weaponHUD.ammoText.text = "ENERGY " + ShotsLeft.ToString("00") + "/" + maxShots.ToString("00") + lockTxt;
+                string fmt = maxShots >= 100 ? "000" : "00";
+                weaponHUD.ammoText.text = ammoLabel + " " + ShotsLeft.ToString(fmt) + "/" + maxShots.ToString(fmt) + lockTxt;
             }
             float fill = Recharging
                 ? 1f - RechargeRemaining / Mathf.Max(0.01f, rechargeTime)
@@ -473,7 +521,7 @@ namespace Gundam.Cockpit
             {
                 if (Recharging)
                 {
-                    weaponHUD.stateText.text = "RECHARGING " + Mathf.CeilToInt(RechargeRemaining) + "s";
+                    weaponHUD.stateText.text = rechargeLabel + " " + Mathf.CeilToInt(RechargeRemaining) + "s";
                     weaponHUD.stateText.color = new Color(1f, 0.8f, 0.2f);
                 }
                 else

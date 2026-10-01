@@ -19,5 +19,19 @@ Initialising UDS system complete:
   - Command buffer size: 8192
   - Hashmap size: 4194304
 Starting Unity Data Store Application
+[Error] Failed to remove data for hash 52f7a0ae46e8801289f9e444a83ec125. Failure received from service
+0x00007ff6d83aac75 (Unity.DataStore) uds_wait_handle_complete
+0x00007ff6d836f835 (Unity.DataStore) uds_cleanup
+0x00007ff6d835edbf (Unity.DataStore) 
+0x00007ff6d836000d (Unity.DataStore) 
+0x00007ff6d83472e5 (Unity.DataStore) 
+0x00007ff6d834676a (Unity.DataStore) 
+0x00007ff6d8346a4f (Unity.DataStore) 
+0x00007ff6d83428b5 (Unity.DataStore) 
+0x00007ff6d83c66f4 (Unity.DataStore) uds_wait_handle_complete
+0x00007ff829cb7344 (KERNEL32) BaseThreadInitThunk
+0x00007ff82b0c26b1 (ntdll) RtlUserThreadStart
+
 Unity Data Store Application Complete
+[Warning] Shutting down service while there are still connected clients, client count = 3
 Shut down UDS service system complete

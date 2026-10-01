@@ -61,7 +61,7 @@ namespace Gundam.Cockpit
     public class WeaponModeController : MonoBehaviour
     {
         // Values kept stable (BeamRifle = 0, BeamSaber = 1) for already-built scenes.
-        public enum Mode { BeamRifle = 0, BeamSaber = 1, HeadVulcan = 2 }
+        public enum Mode { BeamRifle = 0, BeamSaber = 1, HeadVulcan = 2, Bazooka = 3 }
 
         [Header("Right joystick (blocked in BEAM SABER)")]
         public JoystickLever rightStick;
@@ -90,6 +90,14 @@ namespace Gundam.Cockpit
         [Tooltip("Mode at start.")]
         public Mode startMode = Mode.HeadVulcan;
 
+        [Header("ZAKU loadout (per \"자쿠로 고르면 무기창에 히트호크랑 머신건이 있는거야\")")]
+        [Tooltip("True while the pilot flies the ZAKU: BeamRifle slot = MACHINE GUN, BeamSaber slot = HEAT HAWK, no HEAD VULCAN.")]
+        public bool zakuMode;
+        [Tooltip("WEAPON screen - shows HEAT HAWK while it's out in ZAKU mode (the vulcan readout is gone there).")]
+        public CockpitWeaponHUD weaponHUD;
+        [Tooltip("ZAKU BAZOOKA (per \"자쿠 바주카 ... 조작법은 빔라이플이랑 같아\"): a second rifle-type weapon, same controls as BEAM RIFLE (lock + right thumb). ZAKU only.")]
+        public BeamRifleController bazooka;
+
         public Mode CurrentMode { get; private set; } = Mode.HeadVulcan;
         /// <summary>BEAM SABER: RightJoystick currently drives the saber (an enemy is locked).</summary>
         public bool SaberAttackActive => _saberInput;
@@ -107,7 +115,36 @@ namespace Gundam.Cockpit
         bool _saberInput;
 
         public static string DisplayName(Mode m) =>
-            m == Mode.BeamSaber ? "BEAM SABER" : m == Mode.BeamRifle ? "BEAM RIFLE" : "HEAD VULCAN";
+            m == Mode.BeamSaber ? "BEAM SABER" : m == Mode.BeamRifle ? "BEAM RIFLE" : m == Mode.Bazooka ? "BAZOOKA" : "HEAD VULCAN";
+
+        /// <summary>Weapon name for the current mobile suit (GUNDAM or ZAKU).</summary>
+        public string NameOf(Mode m) =>
+            !zakuMode ? DisplayName(m) : m == Mode.BeamSaber ? "HEAT HAWK" : m == Mode.BeamRifle ? "MACHINE GUN" : m == Mode.Bazooka ? "BAZOOKA" : "-";
+
+        /// <summary>Does the current mobile suit have this weapon? (the ZAKU has no Head
+        /// Vulcan; the BAZOOKA belongs to the ZAKU only)</summary>
+        public bool Has(Mode m) => m == Mode.Bazooka ? zakuMode && bazooka != null : !(zakuMode && m == Mode.HeadVulcan);
+
+        /// <summary>Swap the whole hand-weapon set (mobile suit selection at game start):
+        /// puts the current weapons away, takes the new ones and selects startWith.</summary>
+        public void SetLoadout(BeamRifleController newRifle, BeamSaberArmController newSaberArm, HeadVulcanController newVulcan,
+            bool zaku, Mode startWith, BeamRifleController newBazooka = null)
+        {
+            _pending = null;
+            SetConsumersDetached(false);
+            SetRightJoystickBlocked(false);
+            if (saberArm != null) saberArm.SetActive(false);
+            if (rifle != null) rifle.SetActive(false);
+            if (bazooka != null) bazooka.SetActive(false);
+            if (vulcan != null && newVulcan != vulcan) vulcan.enabled = false;
+            rifle = newRifle;
+            saberArm = newSaberArm;
+            vulcan = newVulcan;
+            bazooka = newBazooka;
+            zakuMode = zaku;
+            startMode = startWith;
+            ApplyMode(startWith, force: true);
+        }
 
         void Start()
         {
@@ -118,6 +155,7 @@ namespace Gundam.Cockpit
         /// <summary>Called by the WEAPON display buttons.</summary>
         public void SelectWeapon(Mode m)
         {
+            if (!Has(m)) return;
             if (m == CurrentMode && !_pending.HasValue) return;
             if (m == Mode.BeamSaber && !rightStickDrivesSaber && rightStick != null && rightStick.isGrabbed)
             {
@@ -205,8 +243,20 @@ namespace Gundam.Cockpit
                 if (useStick) saberStick.SpawnAtHand();
             }
             if (saberArm != null) saberArm.SetActive(saber);
-            if (rifle != null) rifle.SetActive(m == Mode.BeamRifle);
-            if (vulcan != null) vulcan.enabled = m != Mode.BeamRifle;
+            // Put the unused rifle-type weapon away BEFORE taking the new one out
+            // (each one saves / restores the lock-on time while it's out).
+            if (rifle != null && m != Mode.BeamRifle) rifle.SetActive(false);
+            if (bazooka != null && m != Mode.Bazooka) bazooka.SetActive(false);
+            if (rifle != null && m == Mode.BeamRifle) rifle.SetActive(true);
+            if (bazooka != null && m == Mode.Bazooka) bazooka.SetActive(true);
+            if (vulcan != null) vulcan.enabled = m != Mode.BeamRifle && m != Mode.Bazooka;
+            if (zakuMode && saber && weaponHUD != null)
+            {
+                if (weaponHUD.nameText != null) weaponHUD.nameText.text = "HEAT HAWK";
+                if (weaponHUD.ammoText != null) weaponHUD.ammoText.text = "MELEE";
+                if (weaponHUD.ammoFillImage != null) { weaponHUD.ammoFillImage.fillAmount = 1f; weaponHUD.ammoFillImage.color = new Color(1f, 0.55f, 0.15f); }
+                if (weaponHUD.stateText != null) { weaponHUD.stateText.text = "READY"; weaponHUD.stateText.color = new Color(0.3f, 1f, 0.4f); }
+            }
 
             ModeChanged?.Invoke(m);
         }

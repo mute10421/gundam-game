@@ -56,6 +56,12 @@ namespace Gundam.Cockpit
         public float thumbBendThreshold = 0.6f;
         [Tooltip("Minimum seconds between shots while the thumb is held bent - prevents runaway rapid-fire from a single held gesture.")]
         public float fireRate = 0.15f;
+
+        [Header("Sound (per \"아까한거는 건담 해드 발칸 소리로 하자\")")]
+        [Tooltip("Recorded burst, looped while the vulcan keeps firing (2D - heard in the cockpit).")]
+        public AudioClip fireSound;
+        [Range(0f, 1f)] public float fireVolume = 0.8f;
+        LoopingFireSound _fireLoop;
         [Tooltip("Total thumb-joint fold (degrees) that counts as 'straight' = bend 0. See OnRightHandJointsUpdated.")]
         public float straightThumbCurlDegrees = 25f;
         [Tooltip("Total thumb-joint fold (degrees) that counts as 'fully bent' = bend 1. With the default 0.6 threshold, firing starts at about 58 degrees.")]
@@ -194,6 +200,7 @@ namespace Gundam.Cockpit
 
         void Awake()
         {
+            if (fireSound != null) _fireLoop = new LoopingFireSound(gameObject, fireSound);
             CurrentAmmo = maxAmmo;
             State = FireReadyState.Ready;
         }
@@ -356,6 +363,7 @@ namespace Gundam.Cockpit
 
         void Update()
         {
+            if (_fireLoop != null) _fireLoop.Tick();
             if (_cooldownTimer > 0f)
             {
                 _cooldownTimer -= Time.deltaTime;
@@ -479,6 +487,7 @@ namespace Gundam.Cockpit
             }
 
             LastFireTime = Time.time;
+            if (_fireLoop != null) _fireLoop.Trigger(fireVolume, 0f, fireRate * 1.6f);
 
             // HUD-only ammo bookkeeping - see ConsumeAmmoForShot's own doc
             // comment. Does not affect anything above.

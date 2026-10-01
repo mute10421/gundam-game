@@ -57,6 +57,13 @@ namespace Gundam.Cockpit
 
         public bool Touching { get; private set; }
 
+        /// <summary>Switch to another body (mobile suit selection) - its offset is re-captured.</summary>
+        public void SetBody(Transform newBody)
+        {
+            body = newBody;
+            _haveOffset = false;
+        }
+
         void LateUpdate()
         {
             if (body == null) return;
